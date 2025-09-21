@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.build/
+dist/
+.eggs/
+*.log
+
+# Virtualenv / tooling
+.venv/
+venv/
+.env/
+.ipynb_checkpoints/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# App artifacts
+runs/
+recordings/
+*.mp4
+*.avi
+*.csv
+*.json
+
+# PyInstaller
+build/
+dist/
+*.spec
