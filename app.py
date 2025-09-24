@@ -1,15 +1,17 @@
 # app.py — NEMESIS UI (v1.0-rc1, unified feature set)
-import sys, os, time, json
+import sys, os, time, json, uuid
 from pathlib import Path
 from collections.abc import Sequence
 
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QFileDialog,
-    QHBoxLayout, QVBoxLayout, QComboBox, QSpinBox, QDoubleSpinBox,
+    QHBoxLayout, QVBoxLayout, QGridLayout, QComboBox, QSpinBox, QDoubleSpinBox,
     QLineEdit, QMessageBox, QSizePolicy, QListView, QSplitter, QStyleFactory, QFrame,
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsProxyWidget, QSplitterHandle
 )
-from PySide6.QtCore import QTimer, Qt, QEvent, QSize, Signal
+from PySide6.QtCore import (
+    QTimer, Qt, QEvent, QSize, Signal, QObject, QThread, QMetaObject, Slot
+)
 from PySide6.QtGui import QImage, QPixmap, QFontDatabase, QFont, QIcon, QPainter, QColor, QPen
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 import matplotlib.pyplot as plt
@@ -23,6 +25,7 @@ import scheduler
 import serial_link
 import logger as runlogger
 import configio
+import cv2
 
 # ---- Assets & Version ----
 # Resolve assets relative to this file, not the current working directory
@@ -809,6 +812,54 @@ class GuideSplitter(QSplitter):
             painter.drawLine(0, int(y), self.width(), int(y))
 
 
+class FrameWorker(QObject):
+    frameReady = Signal(object)
+    error = Signal(str)
+    stopped = Signal()
+
+    def __init__(self, capture: video.VideoCapture, interval_ms: int = 33):
+        super().__init__()
+        self._capture = capture
+        self._interval_ms = max(5, int(interval_ms))
+        self._timer: QTimer | None = None
+        self._running = False
+
+    @Slot()
+    def start(self):
+        if self._running:
+            return
+        self._running = True
+        self._timer = QTimer(self)
+        self._timer.setTimerType(Qt.PreciseTimer)
+        self._timer.setInterval(self._interval_ms)
+        self._timer.timeout.connect(self._poll_frame)
+        self._timer.start()
+
+    @Slot()
+    def stop(self):
+        if not self._running:
+            return
+        self._running = False
+        if self._timer:
+            self._timer.stop()
+            self._timer.deleteLater()
+            self._timer = None
+        self.stopped.emit()
+
+    @Slot()
+    def _poll_frame(self):
+        if not self._running:
+            return
+        try:
+            ok, frame = self._capture.read()
+        except Exception as exc:
+            self.error.emit(f"Camera error: {exc}")
+            return
+        if not ok or frame is None:
+            return
+        self.frameReady.emit(frame)
+
+
 class AspectRatioContainer(QWidget):
     """Container that keeps a child at a fixed aspect ratio and only uses the
     height it needs for the current width (no wasted vertical space)."""
@@ -1095,6 +1146,20 @@ class App(QWidget):
                 if self._popup_qss:
                     # Apply QSS directly to the view so it paints border/radius consistently
                     v.setStyleSheet(self._popup_qss)
+                    try:
+                        v.viewport().setStyleSheet(
+                            f"background: {MID}; border: none; margin: 0px; padding: 0px;"
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        popup_win = v.window()
+                        if popup_win:
+                            popup_win.setStyleSheet(
+                                f"background: {MID}; border: 1px solid {BG}; margin: 0px; padding: 0px;"
+                            )
+                    except Exception:
+                        pass
                 # Keep popup width aligned with the combo; compute a good first width
                 try:
                     hint = 0
@@ -1129,6 +1194,8 @@ class App(QWidget):
         self.statusline = QLabel("—")
         self.statusline.setObjectName("StatusLine")
         self.statusline.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.statusline.setWordWrap(True)
+        self.statusline.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         header_row.addWidget(self.statusline, 1)
         # Small integrated logo at top-right
         self.logo_badge = QLabel()
@@ -1136,7 +1203,7 @@ class App(QWidget):
             pm = QPixmap(str(LOGO_PATH))
             if not pm.isNull():
                 self.logo_badge.setPixmap(pm.scaled(40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        header_row.addWidget(self.logo_badge, 0, Qt.AlignRight)
+        header_row.addWidget(self.logo_badge, 0, Qt.AlignRight | Qt.AlignVCenter)
 
         # ---------- Video preview (zoomable/pannable) ----------
         self.video_view = ZoomView(bg_color=BG)
@@ -1177,18 +1244,21 @@ class App(QWidget):
 
         # ---------- Scheduler controls ----------
         popup_qss = f"""
-            QListView, QComboBox QAbstractItemView {{
+            QListView {{
                 background: {MID};
                 color: {TEXT};
-                border: 1px solid #252a31;
-                border-radius: 6px;
-                margin: 0px;
-                padding: 2px 0;
+                border: 1px solid {BG};
+                border-radius: 0px;
+                padding: 4px 0;
                 outline: none;
             }}
-            QComboBox QAbstractItemView::item, QListView::item {{
+            QListView::item {{
                 padding: 6px 12px;
                 background: transparent;
+            }}
+            QListView::item:selected {{
+                background: {ACCENT};
+                color: {BG};
             }}
         """
         self.mode = App.StyledCombo(popup_qss=popup_qss); self.mode.addItems(["Periodic", "Poisson"])
@@ -1307,12 +1377,20 @@ class App(QWidget):
         ) + 8
         for lbl in (self.lbl_mode, self.lbl_period, self.lbl_lambda, self.lbl_stepsize):
             lbl.setFixedWidth(label_w)
-        r3 = QHBoxLayout()
-        r3.addWidget(self.lbl_mode); r3.addWidget(self.mode)
-        r3.addWidget(self.lbl_period); r3.addWidget(self.period_sec)
-        r3.addWidget(self.lbl_lambda); r3.addWidget(self.lambda_rpm)
-        r3.addWidget(self.lbl_stepsize); r3.addWidget(self.stepsize)
-        right.addLayout(r3)
+        controls_grid = QGridLayout()
+        controls_grid.setContentsMargins(0, 0, 0, 0)
+        controls_grid.setHorizontalSpacing(6)
+        controls_grid.setVerticalSpacing(4)
+        controls_grid.addWidget(self.lbl_mode, 0, 0, Qt.AlignLeft)
+        controls_grid.addWidget(self.mode, 0, 1)
+        controls_grid.addWidget(self.lbl_period, 1, 0, Qt.AlignLeft)
+        controls_grid.addWidget(self.period_sec, 1, 1)
+        controls_grid.addWidget(self.lbl_lambda, 2, 0, Qt.AlignLeft)
+        controls_grid.addWidget(self.lambda_rpm, 2, 1)
+        controls_grid.addWidget(self.lbl_stepsize, 3, 0, Qt.AlignLeft)
+        controls_grid.addWidget(self.stepsize, 3, 1)
+        controls_grid.setColumnStretch(1, 1)
+        right.addLayout(controls_grid)
 
         r3b = QHBoxLayout(); r3b.addWidget(QLabel("Seed:")); r3b.addWidget(self.seed_edit,1); right.addLayout(r3b)
 
@@ -1355,8 +1433,10 @@ class App(QWidget):
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
         try:
-            half = max(360, self.width() // 2)
-            splitter.set_pane_sizes([half, half])
+            total = max(1, self.width())
+            left = int(round(total * 0.75))
+            right = max(360, total - left)
+            splitter.set_pane_sizes([left, right])
         except Exception:
             pass
 
@@ -1387,7 +1467,8 @@ class App(QWidget):
         # ---------- State ----------
         self.cap = None
         self.recorder = None
-        self.frame_timer = QTimer(self); self.frame_timer.timeout.connect(self._grab_frame)
+        self._frame_thread: QThread | None = None
+        self._frame_worker: FrameWorker | None = None
         self.run_timer   = QTimer(self); self.run_timer.setSingleShot(True); self.run_timer.timeout.connect(self._on_tap_due)
         self.scheduler = scheduler.TapScheduler()
         self.serial    = serial_link.SerialLink()
@@ -1514,7 +1595,7 @@ class App(QWidget):
     # ---------- Camera ----------
     def _on_preview_first_frame(self):
         try:
-            self.video_area.set_border_visible(False)
+            self.video_area.set_border_visible(True)
         except Exception:
             pass
 
@@ -1536,11 +1617,12 @@ class App(QWidget):
             except Exception:
                 pass
             self.preview_fps = int(self.cap.get_fps() or 30)
-            self.frame_timer.start(int(1000 / max(1, self.preview_fps)))
+            self._start_frame_stream()
             self.cam_btn.setText("Close Camera"); self._update_status(f"Camera {idx} open. Preview live.")
         else:
             self._stop_recording()
-            self.frame_timer.stop(); self.cap.release(); self.cap = None
+            self._stop_frame_stream()
+            self.cap.release(); self.cap = None
             # Reset to 16:9 when closed
             try:
                 self.video_area.set_aspect(16, 9)
@@ -1666,9 +1748,12 @@ class App(QWidget):
             if resp == QMessageBox.No: return
         outdir = self.outdir_edit.text().strip() or os.getcwd()
         ts = time.strftime("%Y%m%d_%H%M%S")
-        self.run_dir = Path(outdir) / f"run_{ts}"; self.run_dir.mkdir(parents=True, exist_ok=True)
+        run_token = uuid.uuid4().hex[:6].upper()
+        run_id = f"run_{ts}_{run_token}"
+        self.run_dir = Path(outdir) / run_id
+        self.run_dir.mkdir(parents=True, exist_ok=True)
         rec_path = getattr(self.recorder, "path", "") if self.recorder else ""
-        self.logger = runlogger.RunLogger(self.run_dir, recording_path=rec_path)
+        self.logger = runlogger.RunLogger(self.run_dir, run_id=run_id, recording_path=rec_path)
         self.run_start = time.monotonic(); self.taps = 0
 
         # Seed & scheduler config
@@ -1742,13 +1827,11 @@ class App(QWidget):
             pass
 
     # ---------- Frame loop ----------
-    def _grab_frame(self):
-        if self.cap is None: return
-        ok, frame = self.cap.read()
-        if not ok: return
+    def _handle_frame(self, frame):
+        if self.cap is None or frame is None:
+            return
         overlay = frame.copy()
         try:
-            import cv2
             text = f"T+{(time.monotonic()-(self.run_start or time.monotonic())):8.3f}s" if self.run_start else "Preview"
             cv2.putText(overlay, text, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2, cv2.LINE_AA)
         except Exception:
@@ -1757,6 +1840,44 @@ class App(QWidget):
         qimg = QImage(overlay.data, w, h, 3*w, QImage.Format_BGR888)
         self.video_view.set_image(QPixmap.fromImage(qimg))
         if self.recorder: self.recorder.write(overlay)
+
+    def _start_frame_stream(self):
+        if self.cap is None or self._frame_worker is not None:
+            return
+        interval = int(1000 / max(1, self.preview_fps))
+        self._frame_thread = QThread(self)
+        self._frame_worker = FrameWorker(self.cap, interval)
+        self._frame_worker.moveToThread(self._frame_thread)
+        self._frame_worker.frameReady.connect(self._handle_frame, Qt.QueuedConnection)
+        self._frame_worker.error.connect(self._update_status, Qt.QueuedConnection)
+        self._frame_worker.stopped.connect(self._frame_thread.quit)
+        self._frame_thread.finished.connect(self._cleanup_frame_stream)
+        self._frame_thread.started.connect(self._frame_worker.start)
+        self._frame_thread.start()
+
+    def _stop_frame_stream(self):
+        worker = self._frame_worker
+        thread = self._frame_thread
+        if worker:
+            QMetaObject.invokeMethod(worker, "stop", Qt.QueuedConnection)
+        if thread:
+            thread.quit()
+            thread.wait(700)
+        self._cleanup_frame_stream()
+
+    def _cleanup_frame_stream(self):
+        if self._frame_worker is not None:
+            try:
+                self._frame_worker.deleteLater()
+            except Exception:
+                pass
+            self._frame_worker = None
+        if self._frame_thread is not None:
+            try:
+                self._frame_thread.deleteLater()
+            except Exception:
+                pass
+            self._frame_thread = None
 
     # ---------- Status line refresh ----------
     def _refresh_statusline(self):
@@ -1805,7 +1926,10 @@ class App(QWidget):
         if split is None:
             return
         try:
-            split.set_pane_sizes([1, 1])
+            total = max(1, self.width())
+            left = int(round(total * 0.75))
+            right = max(360, total - left)
+            split.set_pane_sizes([left, right])
         except Exception:
             pass
 
@@ -1829,6 +1953,19 @@ class App(QWidget):
                 _set_macos_titlebar_appearance(self, QColor(BG))
             except Exception:
                 pass
+
+    def closeEvent(self, event):
+        try:
+            self._stop_frame_stream()
+        except Exception:
+            pass
+        if self.cap is not None:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
+        super().closeEvent(event)
 
 
 def main():

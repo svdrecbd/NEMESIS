@@ -18,7 +18,7 @@ A desktop acquisition app that:
 - Produces publishable plots from CSV via `plotter.py`
 
 The UI is intentionally **technical & dense** (think Bloomberg/radare2), with a **Pro Mode** for keyboard‑first operation. Typestar OCR is the global font; a minimal dark palette keeps focus on data.
-The main window is split 50/50 by default; the divider snaps to 25% / 50% / 75% anchors and flashes a % badge when you hit a magnet so it’s easy to get symmetric layouts without pixel hunting.
+The main window opens with the preview column taking roughly 75 % of the width. A custom splitter snaps to 25 % / 50 % / 75 % anchors and briefly highlights the handle when you land on a magnet so it’s easy to hit repeatable layouts without pixel hunting.
 
 ---
 
@@ -35,7 +35,7 @@ serial_link.py    # Arduino serial (non‑blocking writes)
 logger.py         # CSV v1.0 logging + run summaries
 plotter.py        # Matplotlib plotting template for rasters & responses
 configio.py       # Save/Load config (~/.nemesis/config.json)
-runs/             # (gitignored) per-run outputs: run_YYYYMMDD_HHMMSS/
+runs/             # (gitignored) per-run outputs: run_YYYYMMDD_HHMMSS_<token>/
 recordings/       # (gitignored) ad‑hoc recordings when no run active
 README.md, .gitignore, requirements.txt
 assets/           # Fonts and images (Typestar, logo)
@@ -80,12 +80,12 @@ python app.py
 3. **Open camera** (select index, hit “Open Camera”). Preview appears.
    - The preview container shows a subtle box while idle; as soon as the first frame arrives the border hides and the image goes edge‑to‑edge.
    - The container adapts to the camera aspect; closing the camera restores a 16:9 placeholder.
-   - Drag the vertical splitter to resize the preview vs. control panes; it snaps at 25 % / 50 % / 75 % with a quick on-screen indicator so you can land on exact splits.
+   - Drag the vertical splitter to resize the preview vs. control panes; it snaps at 25 % / 50 % / 75 % and briefly highlights the handle when you’re on a target.
 4. (Optional) **Start recording** (video is independent of runs; can be toggled live).
 5. Choose mode **Periodic** (seconds) or **Poisson** (taps/min); set parameters.  
    - Optional **seed** for reproducible Poisson sequences.
 6. **Start Run**.  
-   - A folder `runs/run_YYYYMMDD_HHMMSS/` is created with:
+   - A folder `runs/run_YYYYMMDD_HHMMSS_<token>/` is created with:
      - `run.json` – parameters & environment snapshot
      - `taps.csv` – one row per tap (see schema below)
      - `video.mp4` – if recording was ON at any time
@@ -107,7 +107,7 @@ The top status line updates ~2×/s with:
 
 ### CSV v1.0 (`taps.csv`)
 Columns:
-- `run_id` – UUID for this run
+- `run_id` – timestamped slug with a random suffix (`run_YYYYMMDD_HHMMSS_<token>`, `<token>` = 6 hex chars from UUID4) for this run
 - `tap_id` – incremental counter starting at 1
 - `tap_uuid` – unique identifier per tap
 - `t_host_ms` – host monotonic time (ms) at send
@@ -118,10 +118,11 @@ Columns:
 - `recording_path` – path to MP4 if known when row written
 
 ### `run.json`
-Snapshot of parameters at **Start Run**:
-- app version, camera index, recording path (if any), serial port
-- mode parameters (**period_sec** or **lambda_rpm**), **seed**, **stepsize**
-- scheduler descriptor & generated `run_id`
+Snapshot of parameters captured at **Start Run**:
+- `run_id`, `started_at` timestamp, `app_version`, `firmware_commit` placeholder
+- camera index, serial port, current recording path (if any)
+- mode selection with `period_sec` or `lambda_rpm`, seed, stepsize
+- scheduler descriptor mirroring the active settings
 
 ---
 

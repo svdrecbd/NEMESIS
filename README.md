@@ -43,7 +43,8 @@ Zoom & Navigation
 
 Data & Files
 ------------
-- `taps.csv`: tap_id, t_host_s, mode, mark (extendable; future: tap_uuid, run_id, t_host_ms, stepsize, notes)
+- `run_*`: folder per run (`run_YYYYMMDD_HHMMSS_<token>`, `<token>` = 6 hex chars from UUID4)
+- `taps.csv`: run_id, tap_id, tap_uuid, t_host_ms, mode, stepsize, mark, notes, recording_path
 - `plotter.py`: data-free `make_figure(...)` and `save_figure(...)` for raster+scatter plots
 - Planned exports: per-run JSON (config), analysis CSV, plots, and video bundle
 
