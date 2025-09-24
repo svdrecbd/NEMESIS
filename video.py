@@ -51,7 +51,7 @@ class VideoRecorder:
             rec.close()
     """
     def __init__(self, path: str, fps: int = 30, frame_size=(1280, 720)):
-        self.path = path
+        self._path = path
         self.fps = max(1, int(fps))
         self.frame_size = tuple(frame_size)
         self.writer = None
@@ -60,13 +60,18 @@ class VideoRecorder:
     def _open_writer(self):
         # Try MP4 (mp4v) first
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        self.writer = cv2.VideoWriter(self.path, fourcc, self.fps, self.frame_size)
+        self.writer = cv2.VideoWriter(self._path, fourcc, self.fps, self.frame_size)
         if not self.writer.isOpened():
             # Fallback: MJPG in .avi (works widely without system codecs)
-            alt_path = self.path.rsplit('.', 1)[0] + ".avi"
-            self.path = alt_path
+            alt_path = self._path.rsplit('.', 1)[0] + ".avi"
+            self._path = alt_path
             fourcc = cv2.VideoWriter_fourcc(*'MJPG')
-            self.writer = cv2.VideoWriter(self.path, fourcc, self.fps, self.frame_size)
+            self.writer = cv2.VideoWriter(self._path, fourcc, self.fps, self.frame_size)
+
+    @property
+    def path(self) -> str:
+        """Final output path (after any codec fallback)."""
+        return self._path
 
     def is_open(self) -> bool:
         return self.writer is not None and self.writer.isOpened()

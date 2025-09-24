@@ -11,12 +11,14 @@ This document gets a new contributor from zero → productive. It summarizes the
 
 A desktop acquisition app that:
 - Shows a live USB‑microscope preview (“photo‑booth” style)
+- Adapts preview aspect to the camera (4:3/16:9/16:10) and hides the idle border once the first frame arrives
 - Drives an Arduino‑controlled stepper “tapper” with **Periodic** or **Poisson** schedules
 - Records MP4 video independently of tapping (can be on/off at any time)
 - Logs **every tap** to CSV (v1.0 schema) and captures **run.json** snapshot for traceability
 - Produces publishable plots from CSV via `plotter.py`
 
 The UI is intentionally **technical & dense** (think Bloomberg/radare2), with a **Pro Mode** for keyboard‑first operation. Typestar OCR is the global font; a minimal dark palette keeps focus on data.
+The main window is split 50/50 by default; the divider snaps to 25% / 50% / 75% anchors and flashes a % badge when you hit a magnet so it’s easy to get symmetric layouts without pixel hunting.
 
 ---
 
@@ -36,6 +38,7 @@ configio.py       # Save/Load config (~/.nemesis/config.json)
 runs/             # (gitignored) per-run outputs: run_YYYYMMDD_HHMMSS/
 recordings/       # (gitignored) ad‑hoc recordings when no run active
 README.md, .gitignore, requirements.txt
+assets/           # Fonts and images (Typestar, logo)
 ```
 
 ---
@@ -75,6 +78,9 @@ python app.py
 2. **Connect serial** (enter COM port or /dev/tty path → “Connect Serial”).  
    - Tap power (“stepsize”) is 1..5; change via dropdown or Pro keys `1..5`.
 3. **Open camera** (select index, hit “Open Camera”). Preview appears.
+   - The preview container shows a subtle box while idle; as soon as the first frame arrives the border hides and the image goes edge‑to‑edge.
+   - The container adapts to the camera aspect; closing the camera restores a 16:9 placeholder.
+   - Drag the vertical splitter to resize the preview vs. control panes; it snaps at 25 % / 50 % / 75 % with a quick on-screen indicator so you can land on exact splits.
 4. (Optional) **Start recording** (video is independent of runs; can be toggled live).
 5. Choose mode **Periodic** (seconds) or **Poisson** (taps/min); set parameters.  
    - Optional **seed** for reproducible Poisson sequences.
@@ -89,7 +95,7 @@ python app.py
 Toggle **Pro Mode**. Keys:
 - `Space` tap, `S` start/stop run, `R` start/stop recording,
 - `C` connect/disconnect serial, `V` open/close camera,
-- `E` enable motor, `D` disable motor,
+- `E` enable motor, `D` disable motor, `Raise/Lower Arm` buttons nudge in half‑steps,
 - `1..5` set stepsize; `[`/`]` tweak Periodic; `{`/`}` tweak Poisson.
 
 The top status line updates ~2×/s with:  
@@ -123,6 +129,7 @@ Snapshot of parameters at **Start Run**:
 
 - ✅ UI with Typestar OCR, dark palette, NEMESIS logo
 - ✅ Live camera preview; start/stop recording (independent of runs)
+- ✅ Preview box hides after first frame; container matches camera aspect
 - ✅ Periodic & Poisson (seedable); dense, technical status line
 - ✅ Pro Mode keyboard controls
 - ✅ Stepsize control wired to firmware + logged per tap
@@ -130,6 +137,9 @@ Snapshot of parameters at **Start Run**:
 - ✅ Save/Load config (`~/.nemesis/config.json`)
 - ✅ Run snapshot (`run.json`) in each run directory
 - ✅ Version stamp `1.0‑rc1`
+- ✅ Live raster chart embedded under the preview (0–70 min)
+- ✅ Dark combobox popups, fixed control widths, left/right splitter to eliminate layout tug
+- ✅ App‑wide pinch zoom + two‑finger browsing; auto‑hiding slim scrollbars
 
 ---
 
@@ -179,6 +189,7 @@ Snapshot of parameters at **Start Run**:
 - **Serial won’t open** – Confirm port name (e.g., `COM5`, `/dev/ttyUSB0`/`/dev/ttyACM0`), close the Arduino IDE serial monitor.
 - **Recording fails to start** – Codec missing; OpenCV build mismatch. Reinstall `opencv-python` wheels; try a different FourCC if you customized `video.py`.
 - **Font not applied** – Verify `assets/fonts/Typestar OCR Regular.otf` exists; check console for font load message.
+- **Preview border shows during live feed** – By design, the border hides automatically once the first frame arrives. If you keep a visible border during live video on HiDPI displays, use a 2px stroke to avoid sub‑pixel seams.
 
 ---
 

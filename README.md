@@ -7,6 +7,7 @@ NEMESIS is a desktop tool for Stentor habituation experiments:
 - Live microscope preview and recording (photo-booth workflow)
 - Host-driven tap scheduling (Periodic or Poisson) with logging
 - One-click manual tap and motor enable/disable
+- Raise/Lower Arm jog controls for fine positioning (half-step)
 - Sync LED in firmware for frame-accurate alignment
 - Structured CSV logs and plotting helpers
 
@@ -23,14 +24,22 @@ The sync LED on pin 8 lights during a tap for video alignment.
 UI & Workflow
 -------------
 - **Global font:** Typestar OCR (bundled in `assets/fonts/Typestar OCR Regular.otf`).
-- **Theme:** instrument-panel palette (bg #0d0f12, panels #161a1f, text #b8c0cc, subtle #8a93a3, accent #5aa3ff, danger #e33).
+- **Theme:** instrument-panel palette (bg `#0d0f12`, panels `#161a1f`, text `#b8c0cc`, subtle `#8a93a3`, accent `#5aa3ff`, danger `#e33`).
 - **Logo:** `assets/images/logo.png` used as window icon and header badge.
-- **Photo-booth flow:** open camera → adjust focus/POV → Start Recording → Start Run. Recording is independent from the run.
+- **Preview panel:** 16:9 container with a subtle border while idle; as soon as the first real frame arrives the border hides and the preview goes edge‑to‑edge. The container adapts to the camera’s native aspect (4:3/16:9/16:10) to avoid letterboxing artifacts.
+- **Live chart:** template‑style stimulus raster (top) embedded under the preview, themed to match the UI (Typestar, dark). X‑axis shows 0–70 minutes with 10‑min majors and 1‑min minors. Updates live with each tap.
+- **Combobox popups:** dark, padded popup views (no native blue) with fixed control widths to prevent layout nudges.
+- **Photo‑booth flow:** open camera → adjust focus/POV → Start Recording → Start Run. Recording is independent from the run.
 - **Sanity check:** if you start a run without recording, you'll be prompted to confirm.
 - **Pro Mode:** keyboard-first interaction (toggle in UI). When ON, some chrome hides for density and single-key controls are active:
   space=manual tap | r=rec on/off | s=run start/stop | e/d=enable/disable |
   1..5=microstep | c=serial toggle | v=camera toggle |
   [ / ]=−/+ period (Periodic) | { / }=−/+ λ (Poisson)
+
+Zoom & Navigation
+-----------------
+- **App‑wide zoom:** pinch anywhere to scale the entire UI (pure visual; no reflow). Browser parity: Cmd/Ctrl+= (zoom in), Cmd/Ctrl+- (zoom out), Cmd/Ctrl+0 (reset).
+- **Two‑finger browse:** when zoomed in, pan with two‑finger scroll or drag; slim scrollbars auto‑hide after a short delay. At 1.0× there’s no “give” when the window is at minimum size.
 
 Data & Files
 ------------
@@ -58,6 +67,14 @@ Roadmap (short list)
 - Config save/load, reproducible Poisson seed, CSV v2
 - ROI-based response detection with review/override UI
 - Export bundle (.zip) of run artifacts
+
+Recent Changes (highlights)
+---------------------------
+- Preview border hides automatically after first frame; container adapts to camera aspect.
+- Live raster chart embedded under the preview (0–70 min, 10‑min majors, 1‑min minors).
+- Raise/Lower Arm jog buttons under Enable/Disable for half‑step nudging.
+- Dark combobox popups with padding; fixed widths prevent layout jitter.
+- App‑wide pinch zoom with auto‑hiding scrollbars; browser shortcuts added.
 
 Repo Layout (UI-relevant)
 -------------------------
