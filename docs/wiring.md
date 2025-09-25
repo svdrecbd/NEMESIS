@@ -1,0 +1,2 @@
+# Wiring & power notes
+
