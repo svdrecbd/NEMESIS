@@ -15,7 +15,7 @@ A desktop acquisition app that:
 - Drives an Arduino‑controlled stepper “tapper” with **Periodic** or **Poisson** schedules
 - Records MP4 video independently of tapping (can be on/off at any time)
 - Logs **every tap** to CSV (v1.0 schema) and captures **run.json** snapshot for traceability
-- Produces publishable plots from CSV via `plotter.py`
+- Produces publishable plots from CSV via `app/core/plotter.py`
 
 The UI is intentionally **technical & dense** (think Bloomberg/radare2), with a **Pro Mode** for keyboard‑first operation. Typestar OCR is the global font; a minimal dark palette keeps focus on data.
 The main window opens with the preview column taking roughly 75 % of the width. A custom splitter snaps to 25 % / 50 % / 75 % anchors and briefly highlights the handle when you land on a magnet so it’s easy to hit repeatable layouts without pixel hunting.
@@ -25,20 +25,29 @@ The main window opens with the preview column taking roughly 75 % of the width
 ## 2) Repo quick tour
 
 ```
+run.py                     # Entry point (python run.py)
+app/
+  main.py                 # Qt application shell
+  core/
+    scheduler.py
+    video.py
+    plotter.py
+    configio.py
+    logger.py
+  drivers/
+    controller_driver.py   # shared interfaces
+    arduino_driver.py      # legacy serial backend
+    unit1_driver.py        # UNIT1 placeholder
+  ui/                      # drop .ui/.qss assets as needed
 assets/
   fonts/Typestar OCR Regular.otf
   images/logo.png
-app.py            # Main Qt app (PySide6) – v1.0‑rc1
-video.py          # Camera preview + MP4 recording (OpenCV)
-scheduler.py      # Periodic & Poisson (seedable) tap scheduler
-serial_link.py    # Arduino serial (non‑blocking writes)
-logger.py         # CSV v1.0 logging + run summaries
-plotter.py        # Matplotlib plotting template for rasters & responses
-configio.py       # Save/Load config (~/.nemesis/config.json)
-runs/             # (gitignored) per-run outputs: run_YYYYMMDD_HHMMSS_<token>/
-recordings/       # (gitignored) ad‑hoc recordings when no run active
-README.md, .gitignore, requirements.txt
-assets/           # Fonts and images (Typestar, logo)
+firmware/
+  arduino/stentor_habituator_stepper_v9/NEMESIS_Firmware.ino
+  unit1/UNIT1_firmware/...
+docs/
+requirements.txt
+runs/, recordings/ (gitignored outputs)
 ```
 
 ---
@@ -51,7 +60,7 @@ assets/           # Fonts and images (Typestar, logo)
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-python app.py
+python run.py
 ```
 
 **Dependencies (pinned):**
@@ -89,8 +98,12 @@ python app.py
      - `run.json` – parameters & environment snapshot
      - `taps.csv` – one row per tap (see schema below)
      - `video.mp4` – if recording was ON at any time
-7. **Stop Run** when finished. Use `plotter.py` to generate rasters/plots.
+7. **Stop Run** when finished. Use `app/core/plotter.py` to generate rasters/plots.
 
+> Still prefer the pre-NEMESIS serial console? Run `python tools/arduino_wrapper.py --port <your_port>`
+> to get the legacy single-character workflow inside the repo. The wrapper sends digits + newline
+> so firmware prompts behave exactly like before.
+ 
 ### Pro Mode (keyboard-first)
 Toggle **Pro Mode**. Keys:
 - `Space` tap, `S` start/stop run, `R` start/stop recording,
@@ -179,7 +192,7 @@ Snapshot of parameters captured at **Start Run**:
 
 - Create a feature branch; follow the pinned versions in `requirements.txt`.
 - Keep UI changes conservative; favor text density over new widgets.
-- Preserve **CSV schema v1.0**. If you must change it, bump to v1.1 and update `plotter.py` and docs together.
+- Preserve **CSV schema v1.0**. If you must change it, bump to v1.1 and update `app/core/plotter.py` and docs together.
 - Add brief docstrings and log key actions (start/stop run/recording, serial connect).
 
 ---
@@ -196,7 +209,7 @@ Snapshot of parameters captured at **Start Run**:
 
 ## 11) Short checklist for a dev day
 
-- [ ] `python app.py` launches; status line alive.
+- [ ] `python run.py` launches; status line alive.
 - [ ] Serial connects; stepsize `1..5` reaches Arduino.
 - [ ] Camera preview visible; recording toggles ON/OFF.
 - [ ] Start Run → `runs/run_*/{run.json,taps.csv}` created; taps appear in CSV.

@@ -20,16 +20,14 @@ import matplotlib as mpl
 from matplotlib import font_manager
 
 # Internal modules
-import video
-import scheduler
-import serial_link
-import logger as runlogger
-import configio
+from .core import video, scheduler, configio
+from .core import logger as runlogger
+from .drivers.arduino_driver import SerialLink
 import cv2
 
 # ---- Assets & Version ----
-# Resolve assets relative to this file, not the current working directory
-BASE_DIR = Path(__file__).resolve().parent
+# Resolve assets relative to the project root, not the current working directory
+BASE_DIR = Path(__file__).resolve().parent.parent
 ASSETS_DIR = BASE_DIR / "assets"
 FONT_PATH = ASSETS_DIR / "fonts/Typestar OCR Regular.otf"
 LOGO_PATH = ASSETS_DIR / "images/logo.png"
@@ -499,6 +497,45 @@ class ZoomView(QGraphicsView):
             pass
 
 
+class PinnedPreviewWindow(QWidget):
+    """Floating always-on-top window mirroring the live preview."""
+
+    closed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("NEMESIS Preview — Pop-out")
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        self.setWindowFlag(Qt.Tool, True)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.view = ZoomView(bg_color=BG)
+        self.container = AspectRatioContainer(self.view, 16, 9)
+        layout.addWidget(self.container)
+        self.resize(420, 236)
+
+    def set_pixmap(self, pixmap: QPixmap):
+        self.view.set_image(pixmap)
+
+    def set_aspect(self, w: int, h: int):
+        self.container.set_aspect(w, h)
+
+    def set_border_visible(self, on: bool):
+        self.container.set_border_visible(on)
+
+    def reset_first_frame(self):
+        self.view.reset_first_frame()
+
+    def closeEvent(self, event):
+        try:
+            self.closed.emit()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+
 class GuideSplitterHandle(QSplitterHandle):
     def __init__(self, orientation: Qt.Orientation, parent=None):
         super().__init__(orientation, parent)
@@ -902,6 +939,12 @@ class AspectRatioContainer(QWidget):
             self._ratio_w, self._ratio_h = w, h
             self.updateGeometry()
 
+    def aspect_ratio(self) -> tuple[int, int]:
+        return self._ratio_w, self._ratio_h
+
+    def aspect_ratio(self) -> tuple[int, int]:
+        return self._ratio_w, self._ratio_h
+
     def _apply_border_style(self):
         border = f"{self._border_px}px solid #333" if self._show_border else "none"
         self.setStyleSheet(f"background: {BG}; border: {border};")
@@ -915,6 +958,9 @@ class AspectRatioContainer(QWidget):
         except Exception:
             pass
         self.update()
+
+    def border_visible(self) -> bool:
+        return bool(getattr(self, "_show_border", True))
 
     def resizeEvent(self, e):
         # Fit child to inner rect inside border; if border hidden, don't subtract it
@@ -1117,6 +1163,44 @@ class AppZoomView(QGraphicsView):
                 # Ranges will be reset by Qt on sceneRect/resize events
         except Exception:
             pass
+
+
+class PinnedPreviewWindow(QWidget):
+    """Floating always-on-top preview window."""
+
+    closed = Signal()
+
+    def __init__(self):
+        super().__init__(None)
+        self.setWindowTitle("NEMESIS Preview — Pop-out")
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
+        self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.view = ZoomView(bg_color=BG)
+        self.container = AspectRatioContainer(self.view, 16, 9)
+        layout.addWidget(self.container)
+        self.resize(420, 236)
+
+    def set_pixmap(self, pixmap: QPixmap):
+        self.view.set_image(pixmap)
+
+    def set_aspect(self, w: int, h: int):
+        self.container.set_aspect(w, h)
+
+    def set_border_visible(self, on: bool):
+        self.container.set_border_visible(on)
+
+    def reset_first_frame(self):
+        self.view.reset_first_frame()
+
+    def closeEvent(self, event):
+        try:
+            self.closed.emit()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
 
 class App(QWidget):
@@ -1335,7 +1419,20 @@ class App(QWidget):
 
         # Secondary status
         self.status   = QLabel("Idle.")
+        self.status.setWordWrap(True)
+        try:
+            self.status.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        except Exception:
+            pass
+        self.status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self.counters = QLabel("Taps: 0 | Elapsed: 0.0 s | Observed rate: 0.0 /min")
+        self.serial_status = QLabel("Last serial command: —")
+        self.serial_status.setWordWrap(True)
+        try:
+            self.serial_status.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        except Exception:
+            pass
+        self.serial_status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
         # ---------- Layout ----------
         # Left pane: 16:9-bounded preview, then chart; keep both anchored to top
@@ -1359,7 +1456,13 @@ class App(QWidget):
         # Place jog controls directly under Activate/Deactivate row
         r1c = QHBoxLayout(); r1c.addWidget(self.jog_down_btn); r1c.addWidget(self.jog_up_btn); right.addLayout(r1c)
 
-        r2 = QHBoxLayout(); r2.addWidget(QLabel("Camera idx:")); r2.addWidget(self.cam_index); r2.addWidget(self.cam_btn); right.addLayout(r2)
+        r2 = QHBoxLayout(); r2.addWidget(QLabel("Camera idx:")); r2.addWidget(self.cam_index); r2.addWidget(self.cam_btn)
+        self.popout_btn = QPushButton("Pop-out Preview")
+        self.popout_btn.setCheckable(True)
+        self.popout_btn.setToolTip("Open a floating always-on-top preview window")
+        self.popout_btn.toggled.connect(self._toggle_preview_popout)
+        r2.addWidget(self.popout_btn)
+        right.addLayout(r2)
 
         r2b = QHBoxLayout(); r2b.addWidget(self.rec_start_btn); r2b.addWidget(self.rec_stop_btn); r2b.addWidget(self.rec_indicator); right.addLayout(r2b)
 
@@ -1402,7 +1505,9 @@ class App(QWidget):
         r5b = QHBoxLayout(); r5b.addWidget(self.save_cfg_btn); r5b.addWidget(self.load_cfg_btn); right.addLayout(r5b)
 
         # (chart moved under the video preview)
-        right.addWidget(self.counters); right.addWidget(self.status)
+        right.addWidget(self.counters)
+        right.addWidget(self.status)
+        right.addWidget(self.serial_status)
 
         # Decouple panes with a splitter so right-side changes don't tug the preview
         leftw = QWidget(); leftw.setLayout(left)
@@ -1471,11 +1576,12 @@ class App(QWidget):
         self._frame_worker: FrameWorker | None = None
         self.run_timer   = QTimer(self); self.run_timer.setSingleShot(True); self.run_timer.timeout.connect(self._on_tap_due)
         self.scheduler = scheduler.TapScheduler()
-        self.serial    = serial_link.SerialLink()
+        self.serial    = SerialLink()
         self.logger    = None
         self.run_dir   = None
         self.run_start = None
         self.taps = 0; self.preview_fps = 30; self.current_stepsize = 4
+        self._pip_window: PinnedPreviewWindow | None = None
 
         # Dense status line updater
         self.status_timer = QTimer(self); self.status_timer.timeout.connect(self._refresh_statusline); self.status_timer.start(400)
@@ -1483,11 +1589,11 @@ class App(QWidget):
         # ---------- Signals ----------
         self.cam_btn.clicked.connect(self._open_camera)
         self.serial_btn.clicked.connect(self._toggle_serial)
-        self.enable_btn.clicked.connect(lambda: self.serial.send_char('e'))
-        self.disable_btn.clicked.connect(lambda: self.serial.send_char('d'))
+        self.enable_btn.clicked.connect(lambda: self._send_serial_char('e', "Enable motor"))
+        self.disable_btn.clicked.connect(lambda: self._send_serial_char('d', "Disable motor"))
         self.tap_btn.clicked.connect(self._manual_tap)
-        self.jog_up_btn.clicked.connect(lambda: self.serial.send_char('r'))
-        self.jog_down_btn.clicked.connect(lambda: self.serial.send_char('l'))
+        self.jog_up_btn.clicked.connect(lambda: self._send_serial_char('r', "Raise arm"))
+        self.jog_down_btn.clicked.connect(lambda: self._send_serial_char('l', "Lower arm"))
         self.rec_start_btn.clicked.connect(self._start_recording)
         self.rec_stop_btn.clicked.connect(self._stop_recording)
         self.run_start_btn.clicked.connect(self._start_run)
@@ -1503,6 +1609,7 @@ class App(QWidget):
         except Exception:
             pass
         self._mode_changed(); self._update_status("Ready.")
+        self._reset_serial_indicator()
 
     def eventFilter(self, obj, ev):
         # Global pinch-zoom + browser parity shortcuts
@@ -1546,6 +1653,39 @@ class App(QWidget):
         for w in [self.enable_btn, self.disable_btn, self.outdir_btn]:
             w.setVisible(not on)
 
+    def _toggle_preview_popout(self, on: bool):
+        if on:
+            if self._pip_window is None:
+                self._pip_window = PinnedPreviewWindow()
+                self._pip_window.closed.connect(self._on_pip_closed)
+            aspect_w, aspect_h = self.video_area.aspect_ratio()
+            self._pip_window.set_aspect(aspect_w, aspect_h)
+            self._pip_window.set_border_visible(self.video_area.border_visible())
+            self._pip_window.reset_first_frame()
+            self._pip_window.show()
+            try:
+                self._pip_window.raise_()
+                self._pip_window.activateWindow()
+            except Exception:
+                pass
+            self.popout_btn.setText("Close Pop-out")
+            self.popout_btn.setToolTip("Close the floating preview window")
+        else:
+            if self._pip_window:
+                self._pip_window.close()
+            else:
+                self.popout_btn.setText("Pop-out Preview")
+                self.popout_btn.setToolTip("Open a floating always-on-top preview window")
+
+    def _on_pip_closed(self):
+        self._pip_window = None
+        if self.popout_btn.isChecked():
+            self.popout_btn.blockSignals(True)
+            self.popout_btn.setChecked(False)
+            self.popout_btn.blockSignals(False)
+        self.popout_btn.setText("Pop-out Preview")
+        self.popout_btn.setToolTip("Open a floating always-on-top preview window")
+
     def keyPressEvent(self, event):
         if not self.pro_mode:
             return super().keyPressEvent(event)
@@ -1553,8 +1693,8 @@ class App(QWidget):
         if key == Qt.Key_Space: self._send_tap("manual"); return
         if key == Qt.Key_R: self._stop_recording() if self.recorder else self._start_recording(); return
         if key == Qt.Key_S: self._start_run() if self.logger is None else self._stop_run(); return
-        if key == Qt.Key_E: self.serial.send_char('e'); return
-        if key == Qt.Key_D: self.serial.send_char('d'); return
+        if key == Qt.Key_E: self._send_serial_char('e', "Enable motor"); return
+        if key == Qt.Key_D: self._send_serial_char('d', "Disable motor"); return
         if key in (Qt.Key_1, Qt.Key_2, Qt.Key_3, Qt.Key_4, Qt.Key_5):
             val = int(chr(key)); self._apply_stepsize(val); return
         if key == Qt.Key_C: self._toggle_serial(); return
@@ -1590,7 +1730,34 @@ class App(QWidget):
         finally:
             self.stepsize.blockSignals(False)
         # Send '1'..'5' to firmware; Arduino code already maps this to microstepping profile
-        self.serial.send_char(str(val))
+        self._send_serial_char(str(val), "Set stepsize")
+
+    def _reset_serial_indicator(self, note: str | None = None):
+        text = "Last serial command: —"
+        if note:
+            text += f" ({note})"
+        if hasattr(self, "serial_status"):
+            self.serial_status.setText(text)
+
+    def _record_serial_command(self, payload: str, note: str | None = None):
+        display = payload.replace('\n', '↵') if payload else '—'
+        text = f"Last serial command: {display}"
+        if note:
+            text += f" ({note})"
+        if hasattr(self, "serial_status"):
+            self.serial_status.setText(text)
+
+    def _send_serial_char(self, payload: str, note: str | None = None) -> bool:
+        if not payload:
+            return False
+        if not self.serial.is_open():
+            if note:
+                self._record_serial_command('—', f"{note}; serial closed")
+            return False
+        for ch in payload:
+            self.serial.send_char(ch)
+        self._record_serial_command(payload, note)
+        return True
 
     # ---------- Camera ----------
     def _on_preview_first_frame(self):
@@ -1598,6 +1765,11 @@ class App(QWidget):
             self.video_area.set_border_visible(True)
         except Exception:
             pass
+        if self._pip_window:
+            try:
+                self._pip_window.set_border_visible(True)
+            except Exception:
+                pass
 
     def _open_camera(self):
         idx = self.cam_index.value()
@@ -1605,15 +1777,18 @@ class App(QWidget):
             self.cap = video.VideoCapture(idx)
             if not self.cap.open():
                 self._update_status("Failed to open camera."); self.cap = None; return
-            # Adapt preview container to camera aspect ratio
             try:
                 w, h = self.cap.get_size()
                 if w and h:
                     self.video_area.set_aspect(w, h)
                     self.video_area.update()
-                # Keep border visible so preview alignment stays consistent
+                    if self._pip_window:
+                        self._pip_window.set_aspect(w, h)
                 self.video_area.set_border_visible(True)
                 self.video_view.reset_first_frame()
+                if self._pip_window:
+                    self._pip_window.set_border_visible(True)
+                    self._pip_window.reset_first_frame()
             except Exception:
                 pass
             self.preview_fps = int(self.cap.get_fps() or 30)
@@ -1629,6 +1804,10 @@ class App(QWidget):
                 self.video_area.set_border_visible(True)
                 self.video_view.reset_first_frame()
                 self.video_area.update()
+                if self._pip_window:
+                    self._pip_window.set_aspect(16, 9)
+                    self._pip_window.set_border_visible(True)
+                    self._pip_window.reset_first_frame()
             except Exception:
                 pass
             self.cam_btn.setText("Open Camera"); self._update_status("Camera closed.")
@@ -1641,10 +1820,13 @@ class App(QWidget):
             try:
                 self.serial.open(port, baudrate=9600, timeout=0)
                 self.serial_btn.setText("Disconnect Serial"); self._update_status(f"Serial connected on {port}.")
+                self._reset_serial_indicator("connected")
             except Exception as e:
                 self._update_status(f"Serial error: {e}")
+                self._reset_serial_indicator("error")
         else:
             self.serial.close(); self.serial_btn.setText("Connect Serial"); self._update_status("Serial disconnected.")
+            self._reset_serial_indicator("disconnected")
 
     # ---------- Output dir ----------
     def _choose_outdir(self):
@@ -1812,7 +1994,8 @@ class App(QWidget):
         if not self.serial.is_open():
             self._update_status("Tap skipped: serial disconnected.")
             return
-        t_host = time.monotonic(); self.serial.send_char('t')
+        t_host = time.monotonic();
+        self._send_serial_char('t', f"Tap ({mark})")
         self.taps += 1
         elapsed = t_host - (self.run_start or t_host)
         rate = (self.taps/elapsed*60.0) if elapsed>0 else 0.0
@@ -1838,7 +2021,10 @@ class App(QWidget):
             pass
         h, w = overlay.shape[:2]
         qimg = QImage(overlay.data, w, h, 3*w, QImage.Format_BGR888)
-        self.video_view.set_image(QPixmap.fromImage(qimg))
+        pix = QPixmap.fromImage(qimg)
+        self.video_view.set_image(pix)
+        if self._pip_window:
+            self._pip_window.set_pixmap(pix)
         if self.recorder: self.recorder.write(overlay)
 
     def _start_frame_stream(self):
@@ -1965,6 +2151,12 @@ class App(QWidget):
             except Exception:
                 pass
             self.cap = None
+        if self._pip_window:
+            try:
+                self._pip_window.close()
+            except Exception:
+                pass
+            self._pip_window = None
         super().closeEvent(event)
 
 

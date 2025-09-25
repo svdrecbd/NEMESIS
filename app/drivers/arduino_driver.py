@@ -1,8 +1,11 @@
-# serial_link.py — Minimal pyserial wrapper with echo helpers
+# arduino_driver.py — Minimal pyserial wrapper with echo helpers
 import threading, queue, time
 import serial
 
-class SerialLink:
+from .controller_driver import ControllerDriver
+
+
+class SerialLink(ControllerDriver):
     def __init__(self):
         self.ser = None
         self._rx_thread = None

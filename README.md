@@ -13,7 +13,7 @@ NEMESIS is a desktop tool for Stentor habituation experiments:
 
 Hardware/Firmware (upload once)
 -------------------------------
-Use the headless Arduino sketch (NEMESIS_Firmware.ino). Serial commands:
+Use the headless Arduino sketch (`firmware/arduino/stentor_habituator_stepper_v9/NEMESIS_Firmware.ino`). Serial commands:
   't' → tap once (down+up)
   'e' → enable motor    'd' → disable motor
   'r' → jog up          'l' → jog down
@@ -45,7 +45,7 @@ Data & Files
 ------------
 - `run_*`: folder per run (`run_YYYYMMDD_HHMMSS_<token>`, `<token>` = 6 hex chars from UUID4)
 - `taps.csv`: run_id, tap_id, tap_uuid, t_host_ms, mode, stepsize, mark, notes, recording_path
-- `plotter.py`: data-free `make_figure(...)` and `save_figure(...)` for raster+scatter plots
+- `app/core/plotter.py`: data-free `make_figure(...)` and `save_figure(...)` for raster+scatter plots
 - Planned exports: per-run JSON (config), analysis CSV, plots, and video bundle
 
 Recording
@@ -58,8 +58,20 @@ Install & Run
 1) python -m venv .venv
 2) Activate the venv
 3) pip install -r requirements.txt
-4) python app.py
+4) python run.py
 Then: open camera, connect serial, choose output dir, start/stop recording, start/stop run.
+
+Legacy Serial Wrapper
+---------------------
+Need the old manual serial workflow? Use the bundled wrapper instead of leaving the repo:
+
+```bash
+python tools/arduino_wrapper.py --port /dev/ttyUSB0
+```
+
+Type the standard single-character commands (`e`, `d`, `t`, `1`..`5`). When the firmware
+prompts for numeric input, enter the number and press return—the wrapper appends the newline
+for you so the Arduino sketch behaves exactly like the pre-NEMESIS setup.
 
 Roadmap (short list)
 --------------------
@@ -79,14 +91,29 @@ Recent Changes (highlights)
 
 Repo Layout (UI-relevant)
 -------------------------
-app.py
-video.py
-plotter.py
+run.py
+app/
+  main.py
+  core/
+    scheduler.py
+    video.py
+    plotter.py
+    configio.py
+    logger.py
+  drivers/
+    arduino_driver.py
+    controller_driver.py
+    unit1_driver.py
+  ui/
 assets/
   fonts/Typestar OCR Regular.otf
   images/logo.png
+firmware/
+  arduino/stentor_habituator_stepper_v9/NEMESIS_Firmware.ino
+  unit1/UNIT1_firmware/...
+docs/
+tests/
 requirements.txt
-(plus your existing scheduler.py, serial_link.py, logger.py)
 
 License & Attribution
 ---------------------
