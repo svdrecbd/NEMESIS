@@ -1444,21 +1444,51 @@ class App(QWidget):
         if LOGO_PATH.exists():
             candidate = QPixmap(str(LOGO_PATH))
             if not candidate.isNull():
-                footer_pm = candidate.scaled(96, 96, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                scale_factor = 0.35
+                target_w = max(1, int(candidate.width() * scale_factor))
+                target_h = max(1, int(candidate.height() * scale_factor))
+                footer_pm = candidate.scaled(target_w, target_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         if footer_pm is not None:
-            # Create a square pixmap with a white border for better contrast
-            bordered = QPixmap(footer_pm.size() + QSize(8, 8))
-            bordered.fill(Qt.transparent)
-            painter = QPainter(bordered)
-            painter.setRenderHint(QPainter.Antialiasing)
-            pen = QPen(QColor("white"))
-            pen.setWidth(2)
-            painter.setPen(pen)
-            rect = bordered.rect().adjusted(1, 1, -2, -2)
-            painter.drawRoundedRect(rect, 6, 6)
-            painter.drawPixmap(4, 4, footer_pm)
+            src = footer_pm.toImage().convertToFormat(QImage.Format_ARGB32)
+            w, h = src.width(), src.height()
+            cropped = footer_pm.copy(src.rect())
+            # Use transparent background to recolor to black while respecting alpha
+            masked = QPixmap(w, h)
+            masked.fill(Qt.transparent)
+            painter = QPainter(masked)
+            painter.fillRect(masked.rect(), Qt.black)
+            painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+            painter.drawPixmap(0, 0, footer_pm)
             painter.end()
-            self.logo_footer.setPixmap(bordered)
+
+            # Outline using alpha edge detection
+            outline = QImage(w, h, QImage.Format_ARGB32)
+            outline.fill(Qt.transparent)
+            for y in range(h):
+                for x in range(w):
+                    if QColor(src.pixel(x, y)).alpha() == 0:
+                        continue
+                    edge = False
+                    for dx in (-1, 0, 1):
+                        for dy in (-1, 0, 1):
+                            if dx == 0 and dy == 0:
+                                continue
+                            nx, ny = x + dx, y + dy
+                            if nx < 0 or ny < 0 or nx >= w or ny >= h or QColor(src.pixel(nx, ny)).alpha() == 0:
+                                edge = True
+                                break
+                        if edge:
+                            break
+                    if edge:
+                        outline.setPixelColor(x, y, QColor("#333"))
+
+            composed = QPixmap(w, h)
+            composed.fill(Qt.transparent)
+            painter = QPainter(composed)
+            painter.drawPixmap(0, 0, masked)
+            painter.drawImage(0, 0, outline)
+            painter.end()
+            self.logo_footer.setPixmap(composed)
         else:
             self.logo_footer.setText("NEMESIS")
             self.logo_footer.setStyleSheet(f"color: {ACCENT}; font-size: 16pt; font-weight: bold;")
