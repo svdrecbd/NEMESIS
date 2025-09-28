@@ -1281,13 +1281,6 @@ class App(QWidget):
         self.statusline.setWordWrap(True)
         self.statusline.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         header_row.addWidget(self.statusline, 1)
-        # Small integrated logo at top-right
-        self.logo_badge = QLabel()
-        if LOGO_PATH.exists():
-            pm = QPixmap(str(LOGO_PATH))
-            if not pm.isNull():
-                self.logo_badge.setPixmap(pm.scaled(40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        header_row.addWidget(self.logo_badge, 0, Qt.AlignRight | Qt.AlignVCenter)
 
         # ---------- Video preview (zoomable/pannable) ----------
         self.video_view = ZoomView(bg_color=BG)
@@ -1351,14 +1344,22 @@ class App(QWidget):
         fm = self.mode.fontMetrics()
         max_text = max((self.mode.itemText(i) for i in range(self.mode.count())), key=len)
         mode_w = fm.horizontalAdvance(max_text) + 60
-        self.mode.setFixedWidth(max(180, mode_w))
+        self.mode.setMinimumWidth(170)
+        self.mode.setMaximumWidth(max(220, mode_w + 10))
+        self.mode.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         mv = QListView(); self.mode.setView(mv)
         mv.viewport().setAutoFillBackground(True)
         mv.setAutoFillBackground(True)
         mv.setAttribute(Qt.WA_StyledBackground, True)
         mv.setFrameShape(QFrame.NoFrame)
         self.period_sec = QDoubleSpinBox(); self.period_sec.setRange(0.1, 3600.0); self.period_sec.setValue(10.0); self.period_sec.setSuffix(" s")
+        self.period_sec.setMinimumWidth(135)
+        self.period_sec.setMaximumWidth(200)
+        self.period_sec.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.lambda_rpm = QDoubleSpinBox(); self.lambda_rpm.setRange(0.1, 600.0); self.lambda_rpm.setValue(6.0); self.lambda_rpm.setSuffix(" taps/min")
+        self.lambda_rpm.setMinimumWidth(135)
+        self.lambda_rpm.setMaximumWidth(200)
+        self.lambda_rpm.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
         # Stepsize (1..5) — sent to firmware, logged per-tap
         self.stepsize = App.StyledCombo(popup_qss=popup_qss); self.stepsize.addItems(["1 (Full Step)","2 (Half Step)","3 (1/4 Step)","4 (1/8 Step)","5 (1/16 Step)"]); self.stepsize.setCurrentText("4")
@@ -1369,11 +1370,7 @@ class App(QWidget):
         sv.setAutoFillBackground(True)
         sv.setAttribute(Qt.WA_StyledBackground, True)
         sv.setFrameShape(QFrame.NoFrame)
-        # Fixed widths to prevent row reflow on mode change
-        # Slightly compress Period/λ to make room for longer Stepsize labels
-        self.period_sec.setFixedWidth(130)
-        self.lambda_rpm.setFixedWidth(150)
-        # Compute Stepsize width from item text to avoid clipping
+        # Compute Stepsize minimum width from item text to avoid clipping while allowing expansion
         self.stepsize.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         s_fm = self.stepsize.fontMetrics()
         try:
@@ -1381,7 +1378,9 @@ class App(QWidget):
         except ValueError:
             s_max_text = "5"
         s_w = s_fm.horizontalAdvance(s_max_text) + 40  # text + arrow/padding
-        self.stepsize.setFixedWidth(max(130, s_w))
+        self.stepsize.setMinimumWidth(max(150, s_w))
+        self.stepsize.setMaximumWidth(max(210, s_w + 20))
+        self.stepsize.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
         # Poisson RNG seed (optional)
         self.seed_edit = QLineEdit(); self.seed_edit.setPlaceholderText("Seed (optional integer)")
@@ -1426,13 +1425,46 @@ class App(QWidget):
             pass
         self.status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self.counters = QLabel("Taps: 0 | Elapsed: 0.0 s | Observed rate: 0.0 /min")
+        serial_logo_row = QHBoxLayout()
+        serial_logo_row.setContentsMargins(0, 0, 0, 0)
+        serial_logo_row.setSpacing(12)
+
         self.serial_status = QLabel("Last serial command: —")
         self.serial_status.setWordWrap(True)
         try:
             self.serial_status.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         except Exception:
             pass
-        self.serial_status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.serial_status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        serial_logo_row.addWidget(self.serial_status, 1)
+
+        self.logo_footer = QLabel()
+        self.logo_footer.setAlignment(Qt.AlignLeft | Qt.AlignBottom)
+        footer_pm = None
+        if LOGO_PATH.exists():
+            candidate = QPixmap(str(LOGO_PATH))
+            if not candidate.isNull():
+                footer_pm = candidate.scaled(96, 96, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        if footer_pm is not None:
+            # Create a square pixmap with a white border for better contrast
+            bordered = QPixmap(footer_pm.size() + QSize(8, 8))
+            bordered.fill(Qt.transparent)
+            painter = QPainter(bordered)
+            painter.setRenderHint(QPainter.Antialiasing)
+            pen = QPen(QColor("white"))
+            pen.setWidth(2)
+            painter.setPen(pen)
+            rect = bordered.rect().adjusted(1, 1, -2, -2)
+            painter.drawRoundedRect(rect, 6, 6)
+            painter.drawPixmap(4, 4, footer_pm)
+            painter.end()
+            self.logo_footer.setPixmap(bordered)
+        else:
+            self.logo_footer.setText("NEMESIS")
+            self.logo_footer.setStyleSheet(f"color: {ACCENT}; font-size: 16pt; font-weight: bold;")
+        self.logo_footer.setContentsMargins(0, 0, 0, 0)
+        self.logo_footer.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        serial_logo_row.addWidget(self.logo_footer, 0, Qt.AlignLeft | Qt.AlignBottom)
 
         # ---------- Layout ----------
         # Left pane: 16:9-bounded preview, then chart; keep both anchored to top
@@ -1507,7 +1539,8 @@ class App(QWidget):
         # (chart moved under the video preview)
         right.addWidget(self.counters)
         right.addWidget(self.status)
-        right.addWidget(self.serial_status)
+        right.addLayout(serial_logo_row)
+        right.addStretch(1)
 
         # Decouple panes with a splitter so right-side changes don't tug the preview
         leftw = QWidget(); leftw.setLayout(left)
