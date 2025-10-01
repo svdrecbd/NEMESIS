@@ -41,7 +41,7 @@ app/
   ui/                      # drop .ui/.qss assets as needed
 assets/
   fonts/Typestar OCR Regular.otf
-  images/logo.png
+  images/transparent_logo.png
 firmware/
   arduino/stentor_habituator_stepper_v9/NEMESIS_Firmware.ino
   unit1/UNIT1_firmware/...

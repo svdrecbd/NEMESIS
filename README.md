@@ -25,7 +25,7 @@ UI & Workflow
 -------------
 - **Global font:** Typestar OCR (bundled in `assets/fonts/Typestar OCR Regular.otf`).
 - **Theme:** instrument-panel palette (bg `#0d0f12`, panels `#161a1f`, text `#b8c0cc`, subtle `#8a93a3`, accent `#5aa3ff`, danger `#e33`).
-- **Logo:** `assets/images/logo.png` used as window icon and header badge.
+- **Logo:** `assets/images/transparent_logo.png` used as window icon and header badge.
 - **Preview panel:** 16:9 container with a subtle border while idle; as soon as the first real frame arrives the border hides and the preview goes edge‑to‑edge. The container adapts to the camera’s native aspect (4:3/16:9/16:10) to avoid letterboxing artifacts.
 - **Live chart:** template‑style stimulus raster (top) embedded under the preview, themed to match the UI (Typestar, dark). X‑axis shows 0–70 minutes with 10‑min majors and 1‑min minors. Updates live with each tap.
 - **Combobox popups:** dark, padded popup views (no native blue) with fixed control widths to prevent layout nudges.
@@ -107,7 +107,7 @@ app/
   ui/
 assets/
   fonts/Typestar OCR Regular.otf
-  images/logo.png
+  images/transparent_logo.png
 firmware/
   arduino/stentor_habituator_stepper_v9/NEMESIS_Firmware.ino
   unit1/UNIT1_firmware/...

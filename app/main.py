@@ -6,13 +6,13 @@ from collections.abc import Sequence
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QFileDialog,
     QHBoxLayout, QVBoxLayout, QGridLayout, QComboBox, QSpinBox, QDoubleSpinBox,
-    QLineEdit, QMessageBox, QSizePolicy, QListView, QSplitter, QStyleFactory, QFrame,
+    QLineEdit, QMessageBox, QSizePolicy, QListView, QSplitter, QStyleFactory, QFrame, QSpacerItem,
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsProxyWidget, QSplitterHandle
 )
 from PySide6.QtCore import (
-    QTimer, Qt, QEvent, QSize, Signal, QObject, QThread, QMetaObject, Slot
+    QTimer, Qt, QEvent, QSize, Signal, QObject, QThread, QMetaObject, Slot, QUrl
 )
-from PySide6.QtGui import QImage, QPixmap, QFontDatabase, QFont, QIcon, QPainter, QColor, QPen
+from PySide6.QtGui import QImage, QPixmap, QFontDatabase, QFont, QIcon, QPainter, QColor, QPen, QDesktopServices
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MultipleLocator
@@ -30,7 +30,8 @@ import cv2
 BASE_DIR = Path(__file__).resolve().parent.parent
 ASSETS_DIR = BASE_DIR / "assets"
 FONT_PATH = ASSETS_DIR / "fonts/Typestar OCR Regular.otf"
-LOGO_PATH = ASSETS_DIR / "images/logo.png"
+LOGO_PATH = ASSETS_DIR / "images/transparent_logo.png"
+FOOTER_LOGO_SCALE = 0.036  # further ~25% shrink keeps footer badge minimal
 APP_VERSION = "1.0-rc1"
 _FONT_FAMILY = None  # set at runtime when font loads
 
@@ -1425,9 +1426,9 @@ class App(QWidget):
             pass
         self.status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self.counters = QLabel("Taps: 0 | Elapsed: 0.0 s | Observed rate: 0.0 /min")
-        serial_logo_row = QHBoxLayout()
-        serial_logo_row.setContentsMargins(0, 0, 0, 0)
-        serial_logo_row.setSpacing(12)
+        serial_status_row = QHBoxLayout()
+        serial_status_row.setContentsMargins(0, 0, 0, 0)
+        serial_status_row.setSpacing(12)
 
         self.serial_status = QLabel("Last serial command: —")
         self.serial_status.setWordWrap(True)
@@ -1436,7 +1437,7 @@ class App(QWidget):
         except Exception:
             pass
         self.serial_status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        serial_logo_row.addWidget(self.serial_status, 1)
+        serial_status_row.addWidget(self.serial_status, 1)
 
         self.logo_footer = QLabel()
         self.logo_footer.setAlignment(Qt.AlignLeft | Qt.AlignBottom)
@@ -1444,15 +1445,30 @@ class App(QWidget):
         if LOGO_PATH.exists():
             candidate = QPixmap(str(LOGO_PATH))
             if not candidate.isNull():
-                scale_factor = 0.35
-                target_w = max(1, int(candidate.width() * scale_factor))
-                target_h = max(1, int(candidate.height() * scale_factor))
+                target_w = max(1, int(candidate.width() * FOOTER_LOGO_SCALE))
+                target_h = max(1, int(candidate.height() * FOOTER_LOGO_SCALE))
                 footer_pm = candidate.scaled(target_w, target_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         if footer_pm is not None:
             src = footer_pm.toImage().convertToFormat(QImage.Format_ARGB32)
             w, h = src.width(), src.height()
-            cropped = footer_pm.copy(src.rect())
-            # Use transparent background to recolor to black while respecting alpha
+            alpha_threshold = 24
+            # Trim near-transparent padding so the outline tracks the glyph, not the image box
+            min_x, min_y = w, h
+            max_x, max_y = -1, -1
+            for y in range(h):
+                for x in range(w):
+                    if src.pixelColor(x, y).alpha() > alpha_threshold:
+                        if x < min_x: min_x = x
+                        if y < min_y: min_y = y
+                        if x > max_x: max_x = x
+                        if y > max_y: max_y = y
+            if max_x >= min_x and max_y >= min_y:
+                crop_w = max_x - min_x + 1
+                crop_h = max_y - min_y + 1
+                footer_pm = footer_pm.copy(min_x, min_y, crop_w, crop_h)
+                src = src.copy(min_x, min_y, crop_w, crop_h)
+                w, h = crop_w, crop_h
+
             masked = QPixmap(w, h)
             masked.fill(Qt.transparent)
             painter = QPainter(masked)
@@ -1461,12 +1477,11 @@ class App(QWidget):
             painter.drawPixmap(0, 0, footer_pm)
             painter.end()
 
-            # Outline using alpha edge detection
             outline = QImage(w, h, QImage.Format_ARGB32)
             outline.fill(Qt.transparent)
             for y in range(h):
                 for x in range(w):
-                    if QColor(src.pixel(x, y)).alpha() == 0:
+                    if src.pixelColor(x, y).alpha() <= alpha_threshold:
                         continue
                     edge = False
                     for dx in (-1, 0, 1):
@@ -1474,7 +1489,7 @@ class App(QWidget):
                             if dx == 0 and dy == 0:
                                 continue
                             nx, ny = x + dx, y + dy
-                            if nx < 0 or ny < 0 or nx >= w or ny >= h or QColor(src.pixel(nx, ny)).alpha() == 0:
+                            if nx < 0 or ny < 0 or nx >= w or ny >= h or src.pixelColor(nx, ny).alpha() <= alpha_threshold:
                                 edge = True
                                 break
                         if edge:
@@ -1494,7 +1509,10 @@ class App(QWidget):
             self.logo_footer.setStyleSheet(f"color: {ACCENT}; font-size: 16pt; font-weight: bold;")
         self.logo_footer.setContentsMargins(0, 0, 0, 0)
         self.logo_footer.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        serial_logo_row.addWidget(self.logo_footer, 0, Qt.AlignLeft | Qt.AlignBottom)
+        self.logo_footer.setCursor(Qt.PointingHandCursor)
+        self.logo_footer.setToolTip("Open update notes")
+        self.logo_footer.mousePressEvent = self._logo_clicked
+        serial_status_row.addStretch(1)  # keep status text left-aligned
 
         # ---------- Layout ----------
         # Left pane: 16:9-bounded preview, then chart; keep both anchored to top
@@ -1507,16 +1525,29 @@ class App(QWidget):
         left.addWidget(self.video_area, 0, Qt.AlignTop)
         left.addWidget(self.chart_frame, 0, Qt.AlignTop)
         left.addStretch(1)
-        right = QVBoxLayout(); right.setContentsMargins(0, 0, 0, 0); right.setSpacing(8)
-        right.addLayout(header_row)
+        # Top margin keeps controls clear of the window chrome
+        right = QVBoxLayout(); right.setContentsMargins(0, 32, 0, 0); right.setSpacing(8)
+
+        top_status_section = QVBoxLayout()
+        top_status_section.setContentsMargins(0, 0, 0, 0)
+        top_status_section.setSpacing(0)
+        top_status_section.addLayout(header_row)
 
         r1 = QHBoxLayout()
-        r1.addWidget(QLabel("Serial:")); r1.addWidget(self.port_edit,1); r1.addWidget(self.serial_btn); r1.addWidget(self.pro_btn)
-        right.addLayout(r1)
+        r1.addWidget(QLabel("Serial:"))
+        r1.addWidget(self.port_edit, 1)
+        r1.addWidget(self.serial_btn)
+        r1.addWidget(self.pro_btn)
 
-        r1b = QHBoxLayout(); r1b.addWidget(self.enable_btn); r1b.addWidget(self.disable_btn); r1b.addWidget(self.tap_btn); right.addLayout(r1b)
+        r1b = QHBoxLayout(); r1b.addWidget(self.enable_btn); r1b.addWidget(self.disable_btn); r1b.addWidget(self.tap_btn)
         # Place jog controls directly under Activate/Deactivate row
-        r1c = QHBoxLayout(); r1c.addWidget(self.jog_down_btn); r1c.addWidget(self.jog_up_btn); right.addLayout(r1c)
+        r1c = QHBoxLayout(); r1c.addWidget(self.jog_down_btn); r1c.addWidget(self.jog_up_btn)
+        serial_ctrl_section = QVBoxLayout()
+        serial_ctrl_section.setContentsMargins(0, 0, 0, 0)
+        serial_ctrl_section.setSpacing(6)
+        serial_ctrl_section.addLayout(r1)
+        serial_ctrl_section.addLayout(r1b)
+        serial_ctrl_section.addLayout(r1c)
 
         r2 = QHBoxLayout(); r2.addWidget(QLabel("Camera idx:")); r2.addWidget(self.cam_index); r2.addWidget(self.cam_btn)
         self.popout_btn = QPushButton("Pop-out Preview")
@@ -1524,9 +1555,12 @@ class App(QWidget):
         self.popout_btn.setToolTip("Open a floating always-on-top preview window")
         self.popout_btn.toggled.connect(self._toggle_preview_popout)
         r2.addWidget(self.popout_btn)
-        right.addLayout(r2)
-
-        r2b = QHBoxLayout(); r2b.addWidget(self.rec_start_btn); r2b.addWidget(self.rec_stop_btn); r2b.addWidget(self.rec_indicator); right.addLayout(r2b)
+        r2b = QHBoxLayout(); r2b.addWidget(self.rec_start_btn); r2b.addWidget(self.rec_stop_btn); r2b.addWidget(self.rec_indicator)
+        camera_section = QVBoxLayout()
+        camera_section.setContentsMargins(0, 0, 0, 0)
+        camera_section.setSpacing(6)
+        camera_section.addLayout(r2)
+        camera_section.addLayout(r2b)
 
         # Stable label widths to prevent relayout
         self.lbl_mode = QLabel("Mode:")
@@ -1555,22 +1589,65 @@ class App(QWidget):
         controls_grid.addWidget(self.lbl_stepsize, 3, 0, Qt.AlignLeft)
         controls_grid.addWidget(self.stepsize, 3, 1)
         controls_grid.setColumnStretch(1, 1)
-        right.addLayout(controls_grid)
+        mode_section = QVBoxLayout()
+        mode_section.setContentsMargins(0, 0, 0, 0)
+        mode_section.setSpacing(6)
+        mode_section.addLayout(controls_grid)
 
-        r3b = QHBoxLayout(); r3b.addWidget(QLabel("Seed:")); r3b.addWidget(self.seed_edit,1); right.addLayout(r3b)
+        # Seed / run / output configuration cluster
+        r3b = QHBoxLayout(); r3b.addWidget(QLabel("Seed:")); r3b.addWidget(self.seed_edit,1)
+        r4 = QHBoxLayout(); r4.addWidget(self.run_start_btn); r4.addWidget(self.run_stop_btn)
+        r5 = QHBoxLayout(); r5.addWidget(QLabel("Output dir:")); r5.addWidget(self.outdir_edit,1); r5.addWidget(self.outdir_btn)
 
-        r4 = QHBoxLayout(); r4.addWidget(self.run_start_btn); r4.addWidget(self.run_stop_btn); right.addLayout(r4)
-
-        r5 = QHBoxLayout(); r5.addWidget(QLabel("Output dir:")); r5.addWidget(self.outdir_edit,1); r5.addWidget(self.outdir_btn); right.addLayout(r5)
-        
         # Config save/load row (was missing from layout)
-        r5b = QHBoxLayout(); r5b.addWidget(self.save_cfg_btn); r5b.addWidget(self.load_cfg_btn); right.addLayout(r5b)
+        r5b = QHBoxLayout(); r5b.addWidget(self.save_cfg_btn); r5b.addWidget(self.load_cfg_btn)
+
+        io_section = QVBoxLayout()
+        io_section.setContentsMargins(0, 0, 0, 0)
+        io_section.setSpacing(6)
+        io_section.addLayout(r3b)
+        io_section.addLayout(r4)
+        io_section.addLayout(r5)
+        io_section.addLayout(r5b)
 
         # (chart moved under the video preview)
-        right.addWidget(self.counters)
-        right.addWidget(self.status)
-        right.addLayout(serial_logo_row)
-        right.addStretch(1)
+        footer_status_section = QVBoxLayout()
+        footer_status_section.setContentsMargins(0, 0, 0, 0)
+        footer_status_section.setSpacing(6)
+        footer_status_section.addWidget(self.counters)
+        footer_status_section.addWidget(self.status)
+        footer_status_section.addLayout(serial_status_row)
+
+        logo_section = QVBoxLayout()
+        logo_section.setContentsMargins(0, 0, 0, 0)
+        logo_section.setSpacing(0)
+        logo_row = QHBoxLayout()
+        logo_row.setContentsMargins(0, 8, 0, 0)  # small gap above helps line up with chart base
+        logo_row.addWidget(self.logo_footer, 0, Qt.AlignBottom | Qt.AlignLeft)
+        logo_row.addStretch(1)
+        logo_section.addLayout(logo_row)
+        logo_section.addStretch(1)
+
+        section_gap = 54  # triple gap keeps clusters distinct without feeling sparse
+        self._section_gap = section_gap
+        sections = [
+            top_status_section,
+            serial_ctrl_section,
+            camera_section,
+            mode_section,
+            io_section,
+            footer_status_section,
+            logo_section,
+        ]
+        self._section_layouts = sections
+        self._section_spacers = []
+        for idx, section in enumerate(sections):
+            right.addLayout(section)
+            if idx < len(sections) - 1:
+                spacer = QSpacerItem(0, section_gap, QSizePolicy.Minimum, QSizePolicy.Fixed)
+                self._section_spacers.append(spacer)
+                right.addItem(spacer)
+
 
         # Decouple panes with a splitter so right-side changes don't tug the preview
         leftw = QWidget(); leftw.setLayout(left)
@@ -1582,6 +1659,8 @@ class App(QWidget):
         except Exception:
             pass
         rightw = QWidget(); rightw.setLayout(right)
+        self._right_layout = right
+        self._right_widget = rightw
         rightw.setAutoFillBackground(True)
         pal_right = rightw.palette(); pal_right.setColor(rightw.backgroundRole(), QColor(BG)); rightw.setPalette(pal_right)
         try:
@@ -1631,6 +1710,7 @@ class App(QWidget):
         QTimer.singleShot(0, self._adjust_min_window_size)
         QTimer.singleShot(0, self._apply_titlebar_theme)
         QTimer.singleShot(0, self._init_splitter_balance)
+        QTimer.singleShot(0, self._update_section_spacers)
 
         # ---------- State ----------
         self.cap = None
@@ -1673,6 +1753,44 @@ class App(QWidget):
             pass
         self._mode_changed(); self._update_status("Ready.")
         self._reset_serial_indicator()
+
+    def _update_section_spacers(self):
+        spacers = getattr(self, "_section_spacers", None)
+        layouts = getattr(self, "_section_layouts", None)
+        right_widget = getattr(self, "_right_widget", None)
+        if not spacers or not layouts or right_widget is None:
+            return
+        gaps = len(spacers)
+        if gaps == 0:
+            return
+        try:
+            available = right_widget.height() - sum(layout.sizeHint().height() for layout in layouts)
+        except Exception:
+            available = 0
+        available = max(0, available)
+        target = self._section_gap
+        if gaps:
+            try:
+                target = min(self._section_gap, available // gaps)
+            except Exception:
+                target = self._section_gap
+        target = max(0, target)
+        for spacer in spacers:
+            spacer.changeSize(0, target, QSizePolicy.Minimum, QSizePolicy.Fixed)
+        try:
+            self._right_layout.invalidate()
+        except Exception:
+            pass
+
+    def _logo_clicked(self, _event):
+        try:
+            QDesktopServices.openUrl(QUrl("https://californianumerics.com"))
+        except Exception:
+            pass
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_section_spacers()
 
     def eventFilter(self, obj, ev):
         # Global pinch-zoom + browser parity shortcuts
