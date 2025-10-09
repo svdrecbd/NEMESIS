@@ -17,8 +17,7 @@ A desktop acquisition app that:
 - Logs **every tap** to CSV (v1.0 schema) and captures **run.json** snapshot for traceability
 - Produces publishable plots from CSV via `app/core/plotter.py`
 
-The UI is intentionally **technical & dense** (think Bloomberg/radare2), with a **Pro Mode** for keyboard‑first operation. Typestar OCR is the global font; a minimal dark palette keeps focus on data.
-The main window opens with the preview column taking roughly 75 % of the width. A custom splitter snaps to 25 % / 50 % / 75 % anchors and briefly highlights the handle when you land on a magnet so it’s easy to hit repeatable layouts without pixel hunting.
+The UI is intentionally **technical & dense** (think Bloomberg/radare2), with a **Pro Mode** for keyboard‑first operation. Typestar OCR is the global font; the default loads in **Light Mode** with controls on the **left** and data on the right (75 % of the width). A custom splitter snaps to 25 % / 50 % / 75 % anchors and briefly highlights the handle when you land on a magnet so it’s easy to hit repeatable layouts without pixel hunting.
 
 ---
 
@@ -83,8 +82,8 @@ python run.py
 
 ## 5) Daily workflow
 
-1. **Open NEMESIS.**
-2. **Connect serial** (enter COM port or /dev/tty path → “Connect Serial”).  
+1. **Open NEMESIS.** (Light theme, controls left, 25 %/75 % split.)
+2. **Connect serial.** Use the combo box above the serial section; pick a detected port or type one manually, then click **Connect Serial**.  
    - Tap power (“stepsize”) is 1..5; change via dropdown or Pro keys `1..5`.
 3. **Open camera** (select index, hit “Open Camera”). Preview appears.
    - The preview container shows a subtle box while idle; as soon as the first frame arrives the border hides and the image goes edge‑to‑edge.
@@ -93,12 +92,13 @@ python run.py
 4. (Optional) **Start recording** (video is independent of runs; can be toggled live).
 5. Choose mode **Periodic** (seconds) or **Poisson** (taps/min); set parameters.  
    - Optional **seed** for reproducible Poisson sequences.
-6. **Start Run**.  
-   - A folder `runs/run_YYYYMMDD_HHMMSS_<token>/` is created with:
+6. *(Optional troubleshooting)* **Flash Hardware Config**. Sends the current settings to the board so you can flip the physical switch and observe motion without logging taps. Status will read “Config flashed for testing…” until you start a run.
+7. **Start Run** when you want to record data.  
+   - The app resends the configuration, enables logging, and creates `runs/run_YYYYMMDD_HHMMSS_<token>/` with:
      - `run.json` – parameters & environment snapshot
      - `taps.csv` – one row per tap (see schema below)
      - `video.mp4` – if recording was ON at any time
-7. **Stop Run** when finished. Use `app/core/plotter.py` to generate rasters/plots.
+8. **Stop Run** (or flip the physical switch off) when finished. Use `app/core/plotter.py` to generate rasters/plots.
 
 > Still prefer the pre-NEMESIS serial console? Run `python tools/arduino_wrapper.py --port <your_port>`
 > to get the legacy single-character workflow inside the repo. The wrapper sends digits + newline

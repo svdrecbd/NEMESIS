@@ -7,10 +7,12 @@ from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QFileDialog,
     QHBoxLayout, QVBoxLayout, QGridLayout, QComboBox, QSpinBox, QDoubleSpinBox,
     QLineEdit, QMessageBox, QSizePolicy, QListView, QSplitter, QStyleFactory, QFrame, QSpacerItem,
-    QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsProxyWidget, QSplitterHandle
+    QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsProxyWidget, QSplitterHandle, QMenu,
+    QGraphicsOpacityEffect
 )
 from PySide6.QtCore import (
-    QTimer, Qt, QEvent, QSize, Signal, QObject, QThread, QMetaObject, Slot, QUrl
+    QTimer, Qt, QEvent, QSize, Signal, QObject, QThread, QMetaObject, Slot, QUrl, QPoint,
+    QPropertyAnimation, QEasingCurve, QAbstractAnimation
 )
 from PySide6.QtGui import QImage, QPixmap, QFontDatabase, QFont, QIcon, QPainter, QColor, QPen, QDesktopServices
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -18,6 +20,7 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import MultipleLocator
 import matplotlib as mpl
 from matplotlib import font_manager
+from serial.tools import list_ports
 
 # Internal modules
 from .core import video, scheduler, configio
@@ -35,13 +38,89 @@ FOOTER_LOGO_SCALE = 0.036  # further ~25% shrink keeps footer badge minimal
 APP_VERSION = "1.0-rc1"
 _FONT_FAMILY = None  # set at runtime when font loads
 
-# ---- Theme (dark, information-dense) ----
-BG     = "#0d0f12"
-MID    = "#161a1f"
-TEXT   = "#b8c0cc"
-SUBTXT = "#8a93a3"
-ACCENT = "#5aa3ff"
-DANGER = "#e33"
+
+# ---- Themes ----
+THEMES: dict[str, dict[str, str]] = {
+    "dark": {
+        "BG": "#0d0f12",
+        "MID": "#161a1f",
+        "TEXT": "#e6ecf7",
+        "SUBTXT": "#8a93a3",
+        "ACCENT": "#5aa3ff",
+        "DANGER": "#e33",
+        "BORDER": "#333333",
+        "SCROLLBAR": "#2a2f36",
+        "OUTLINE": "#333333",
+        "PLOT_FACE": "#161a1f",
+        "GRID": "#3a414b",
+        "DISABLED_BG": "#0a0d11",
+        "DISABLED_TEXT": "#5e6876",
+        "DISABLED_BORDER": "#11161c",
+        "BUTTON_BORDER": "#252a31",
+        "BUTTON_CHECKED_BG": "#1f2731",
+        "INPUT_BORDER": "#252a31",
+    },
+    "light": {
+        "BG": "#f4f7fb",
+        "MID": "#e7ecf6",
+        "TEXT": "#1d2334",
+        "SUBTXT": "#4f5a6d",
+        "ACCENT": "#3367ff",
+        "DANGER": "#c0392b",
+        "BORDER": "#cbd4e4",
+        "SCROLLBAR": "#a3b1c7",
+        "OUTLINE": "#9aa7bd",
+        "PLOT_FACE": "#f4f7fb",
+        "GRID": "#cdd5e5",
+        "DISABLED_BG": "#e0e6f2",
+        "DISABLED_TEXT": "#8a94a6",
+        "DISABLED_BORDER": "#c5cedf",
+        "BUTTON_BORDER": "#c0c8da",
+        "BUTTON_CHECKED_BG": "#d6def2",
+        "INPUT_BORDER": "#c0c8da",
+    },
+}
+
+DEFAULT_THEME_NAME = "light"
+_ACTIVE_THEME_NAME = DEFAULT_THEME_NAME
+
+
+def _apply_theme_globals(theme: dict[str, str]) -> None:
+    global BG, MID, TEXT, SUBTXT, ACCENT, DANGER, BORDER, SCROLLBAR, OUTLINE, PLOT_FACE, GRID, DISABLED_BG, DISABLED_TEXT, DISABLED_BORDER, BUTTON_BORDER, BUTTON_CHECKED_BG, INPUT_BORDER
+    BG = theme["BG"]
+    MID = theme["MID"]
+    TEXT = theme["TEXT"]
+    SUBTXT = theme["SUBTXT"]
+    ACCENT = theme["ACCENT"]
+    DANGER = theme["DANGER"]
+    BORDER = theme["BORDER"]
+    SCROLLBAR = theme["SCROLLBAR"]
+    OUTLINE = theme["OUTLINE"]
+    PLOT_FACE = theme["PLOT_FACE"]
+    GRID = theme["GRID"]
+    DISABLED_BG = theme["DISABLED_BG"]
+    DISABLED_TEXT = theme["DISABLED_TEXT"]
+    DISABLED_BORDER = theme["DISABLED_BORDER"]
+    BUTTON_BORDER = theme["BUTTON_BORDER"]
+    BUTTON_CHECKED_BG = theme["BUTTON_CHECKED_BG"]
+    INPUT_BORDER = theme["INPUT_BORDER"]
+
+
+def active_theme() -> dict[str, str]:
+    return THEMES[_ACTIVE_THEME_NAME]
+
+
+_apply_theme_globals(active_theme())
+
+
+def set_active_theme(name: str) -> dict[str, str]:
+    global _ACTIVE_THEME_NAME
+    if name not in THEMES:
+        raise ValueError(f"Unknown theme '{name}'")
+    _ACTIVE_THEME_NAME = name
+    theme = active_theme()
+    _apply_theme_globals(theme)
+    return theme
 
 def build_stylesheet(font_family: str | None, scale: float = 1.0) -> str:
     s = max(0.7, min(scale, 2.0))
@@ -54,17 +133,17 @@ def build_stylesheet(font_family: str | None, scale: float = 1.0) -> str:
 * {{ background: {BG}; color: {TEXT}; font-size: {font_pt}pt; {family_rule} }}
 QWidget {{ background: {BG}; }}
 QLabel#StatusLine {{ color: {TEXT}; font-size: {status_pt}pt; }}
-QPushButton {{ background: {MID}; border:1px solid #252a31; padding:{btn_py}px {btn_px}px; border-radius:{rad}px; }}
+QPushButton {{ background: {MID}; border:1px solid {BUTTON_BORDER}; padding:{btn_py}px {btn_px}px; border-radius:{rad}px; }}
 QPushButton:hover {{ border-color: {ACCENT}; }}
-QPushButton:checked {{ background:#1f2731; border-color:{ACCENT}; }}
-QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{ background:{MID}; border:1px solid #252a31; padding:{inp_py}px {inp_px}px; border-radius:{rad}px; }}
+QPushButton:checked {{ background:{BUTTON_CHECKED_BG}; border-color:{ACCENT}; }}
+QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{ background:{MID}; border:1px solid {INPUT_BORDER}; padding:{inp_py}px {inp_px}px; border-radius:{rad}px; }}
 /* Disabled state — strongly greyed out for clarity */
 QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {{
-    background: #0a0d11;        /* darker than BG */
-    color: #5e6876;             /* much dimmer text */
-    border: 1px solid #11161c;  /* subdued border */
+    background: {DISABLED_BG};        /* darker or lighter variant */
+    color: {DISABLED_TEXT};           /* dimmer text */
+    border: 1px solid {DISABLED_BORDER};  /* subdued border */
 }}
-QLabel:disabled {{ color: #5e6876; }}
+QLabel:disabled {{ color: {DISABLED_TEXT}; }}
 """
 
 def _apply_global_font(app: QApplication):
@@ -77,7 +156,7 @@ def _apply_global_font(app: QApplication):
             _FONT_FAMILY = fams[0]
             app.setFont(QFont(_FONT_FAMILY, 11))
 
-def apply_matplotlib_theme(font_family: str | None):
+def apply_matplotlib_theme(font_family: str | None, theme: dict[str, str]):
     """Make Matplotlib match the NEMESIS UI theme."""
     mpl_family = None
     try:
@@ -90,6 +169,9 @@ def apply_matplotlib_theme(font_family: str | None):
     family = mpl_family or font_family or "DejaVu Sans"
     base_size = 10
     tick_size = max(8, base_size - 1)
+    face = theme.get("PLOT_FACE", theme.get("MID", MID))
+    text_color = theme.get("TEXT", TEXT)
+    grid_color = theme.get("GRID", GRID)
     mpl.rcParams.update({
         "font.family": [family],
         "font.sans-serif": [family, "DejaVu Sans", "Arial"],
@@ -98,22 +180,22 @@ def apply_matplotlib_theme(font_family: str | None):
         "axes.labelsize": base_size,
         "xtick.labelsize": tick_size,
         "ytick.labelsize": tick_size,
-        "figure.facecolor": MID,
-        "axes.facecolor": MID,
-        "axes.edgecolor": TEXT,
-        "axes.labelcolor": TEXT,
-        "xtick.color": TEXT,
-        "ytick.color": TEXT,
-        "text.color": TEXT,
+        "figure.facecolor": face,
+        "axes.facecolor": face,
+        "axes.edgecolor": text_color,
+        "axes.labelcolor": text_color,
+        "xtick.color": text_color,
+        "ytick.color": text_color,
+        "text.color": text_color,
         "figure.autolayout": True,
-        "grid.color": "#3a414b",
+        "grid.color": grid_color,
         "grid.linestyle": ":",
         "grid.alpha": 0.8,
         "axes.titleweight": "regular",
         "axes.titlepad": 8,
         "axes.grid": False,
-        "savefig.facecolor": MID,
-        "savefig.edgecolor": MID,
+        "savefig.facecolor": face,
+        "savefig.edgecolor": face,
     })
 
 
@@ -192,8 +274,10 @@ def _set_macos_titlebar_appearance(widget: QWidget, color: QColor) -> bool:
     return True
 
 class LiveChart:
-    def __init__(self, font_family: str | None):
-        apply_matplotlib_theme(font_family)
+    def __init__(self, font_family: str | None, theme: dict[str, str]):
+        self.font_family = font_family
+        self.theme = theme
+        apply_matplotlib_theme(font_family, theme)
         self.fig, (self.ax_top, self.ax_bot) = plt.subplots(
             2, 1, sharex=True, figsize=(6.2, 3.2),
             gridspec_kw={"height_ratios": [1, 5]}
@@ -215,7 +299,8 @@ class LiveChart:
         self._init_axes()
 
     def _init_axes(self):
-        self.fig.suptitle("Stentor Habituation to Stimuli", fontsize=10, color=TEXT, y=0.96)
+        text_color = self.color("TEXT")
+        self.fig.suptitle("Stentor Habituation to Stimuli", fontsize=10, color=text_color, y=0.96)
         # Make figure/axes transparent so the framed panel shows through
         try:
             self.fig.patch.set_alpha(0.0)
@@ -228,7 +313,7 @@ class LiveChart:
             ax.set_facecolor('none')
         except Exception:
             pass
-        ax.set_ylabel("Taps", color=TEXT)
+        ax.set_ylabel("Taps", color=text_color)
         ax.set_yticks([])
         ax.set_xlim(0, 70)
         ax.xaxis.set_major_locator(MultipleLocator(10))
@@ -236,7 +321,7 @@ class LiveChart:
         ax.grid(True, which="major", axis="x", linestyle=":", alpha=0.9)
         ax.grid(True, which="minor", axis="x", linestyle=":", alpha=0.35)
         for spine in ax.spines.values():
-            spine.set_color(TEXT)
+            spine.set_color(text_color)
 
         ax2 = self.ax_bot
         ax2.clear()
@@ -254,7 +339,7 @@ class LiveChart:
         ax2.grid(True, which="minor", axis="x", linestyle=":", alpha=0.35)
         ax2.yaxis.set_major_formatter(plt.FuncFormatter("{:.0f}%".format))
         for spine in ax2.spines.values():
-            spine.set_color(TEXT)
+            spine.set_color(text_color)
         self.canvas.draw_idle()
 
     def reset(self):
@@ -276,7 +361,8 @@ class LiveChart:
             ax.set_facecolor('none')
         except Exception:
             pass
-        ax.set_ylabel("Taps", color=TEXT)
+        text_color = self.color("TEXT")
+        ax.set_ylabel("Taps", color=text_color)
         ax.set_yticks([])
         ax.set_xlim(0, 70)
         ax.xaxis.set_major_locator(MultipleLocator(10))
@@ -284,14 +370,26 @@ class LiveChart:
         ax.grid(True, which="major", axis="x", linestyle=":", alpha=0.9)
         ax.grid(True, which="minor", axis="x", linestyle=":", alpha=0.35)
         for spine in ax.spines.values():
-            spine.set_color(TEXT)
+            spine.set_color(text_color)
 
         if regular:
-            ax.eventplot(regular, orientation="horizontal", colors=TEXT, linewidth=0.9)
+            ax.eventplot(regular, orientation="horizontal", colors=text_color, linewidth=0.9)
         if highlighted:
-            ax.eventplot(highlighted, orientation="horizontal", colors=ACCENT, linewidth=1.6)
+            ax.eventplot(highlighted, orientation="horizontal", colors=self.color("ACCENT"), linewidth=1.6)
         self.ax_bot.set_ylim(-5, 105)
         self.canvas.draw_idle()
+
+    def color(self, key: str) -> str:
+        if key in self.theme:
+            return self.theme[key]
+        return active_theme().get(key, globals().get(key, "#ffffff"))
+
+    def set_theme(self, theme: dict[str, str]):
+        self.theme = theme
+        apply_matplotlib_theme(self.font_family, theme)
+        self._init_axes()
+        if self.times_sec:
+            self._redraw()
 
 
 class ZoomView(QGraphicsView):
@@ -307,6 +405,7 @@ class ZoomView(QGraphicsView):
             self.setBackgroundBrush(QColor(bg_color))
         except Exception:
             pass
+        self._bg_color = bg_color
         self.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
         self.setDragMode(QGraphicsView.ScrollHandDrag)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
@@ -328,10 +427,10 @@ class ZoomView(QGraphicsView):
         )
         self._scrollbar_qss = (
             "QScrollBar:vertical { width: 6px; background: transparent; margin: 2px; }\n"
-            "QScrollBar::handle:vertical { background: #2a2f36; border-radius: 3px; }\n"
+            f"QScrollBar::handle:vertical {{ background: {SCROLLBAR}; border-radius: 3px; }}\n"
             "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; background: transparent; }\n"
             "QScrollBar:horizontal { height: 6px; background: transparent; margin: 2px; }\n"
-            "QScrollBar::handle:horizontal { background: #2a2f36; border-radius: 3px; }\n"
+            f"QScrollBar::handle:horizontal {{ background: {SCROLLBAR}; border-radius: 3px; }}\n"
             "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; background: transparent; }\n"
         )
         try:
@@ -352,6 +451,33 @@ class ZoomView(QGraphicsView):
         # Enable pinch gesture across platforms
         try:
             self.grabGesture(Qt.PinchGesture)
+        except Exception:
+            pass
+
+    def _build_scrollbar_qss(self, color: str) -> str:
+        return (
+            "QScrollBar:vertical { width: 6px; background: transparent; margin: 2px; }\n"
+            f"QScrollBar::handle:vertical {{ background: {color}; border-radius: 3px; }}\n"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; background: transparent; }\n"
+            "QScrollBar:horizontal { height: 6px; background: transparent; margin: 2px; }\n"
+            f"QScrollBar::handle:horizontal {{ background: {color}; border-radius: 3px; }}\n"
+            "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; background: transparent; }\n"
+        )
+
+    def set_theme(self, theme: dict[str, str]):
+        bg_color = theme.get("BG", self._bg_color)
+        try:
+            self.setBackgroundBrush(QColor(bg_color))
+        except Exception:
+            pass
+        self._bg_color = bg_color
+        self._scrollbar_qss = self._build_scrollbar_qss(theme.get("SCROLLBAR", SCROLLBAR))
+        try:
+            if self._scrollbar_style_applied:
+                self.setStyleSheet(self._base_qss + self._scrollbar_qss)
+            else:
+                self.setStyleSheet(self._base_qss)
+            self.viewport().setStyleSheet("background: transparent; border: none;")
         except Exception:
             pass
 
@@ -538,23 +664,19 @@ class PinnedPreviewWindow(QWidget):
 
 
 class GuideSplitterHandle(QSplitterHandle):
-    def __init__(self, orientation: Qt.Orientation, parent=None):
+    def __init__(self, orientation: Qt.Orientation, parent=None, theme: dict[str, str] | None = None):
         super().__init__(orientation, parent)
         self.setCursor(Qt.SplitHCursor if orientation == Qt.Horizontal else Qt.SplitVCursor)
-        self._base = QColor(BG)
-        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
-        self.setAutoFillBackground(True)
-        pal = self.palette()
-        pal.setColor(self.backgroundRole(), QColor(BG))
-        self.setPalette(pal)
+        self._theme = theme or active_theme()
+        self._apply_theme()
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, False)
         rect = self.rect()
-        painter.fillRect(rect, QColor(BG))
+        painter.fillRect(rect, QColor(self._theme.get("BG", BG)))
         painter.setPen(Qt.NoPen)
-        painter.setBrush(self._base)
+        painter.setBrush(QColor(self._theme.get("BG", BG)))
         painter.drawRect(rect)
         splitter = self.splitter()
         active_idx = getattr(splitter, "_active_handle_index", None) if splitter else None
@@ -568,7 +690,7 @@ class GuideSplitterHandle(QSplitterHandle):
             except Exception:
                 match_idx = None
         if active_idx is not None and match_idx == active_idx:
-            pen = QPen(QColor(ACCENT))
+            pen = QPen(QColor(self._theme.get("ACCENT", ACCENT)))
             pen.setStyle(Qt.CustomDashLine)
             pen.setDashPattern([1, 4])
             pen.setCosmetic(True)
@@ -626,30 +748,38 @@ class GuideSplitterHandle(QSplitterHandle):
                     splitter.update()
         QTimer.singleShot(450, lambda: splitter._clear_active_ratio() if hasattr(splitter, "_clear_active_ratio") else None)
 
+    def _apply_theme(self):
+        base_color = QColor(self._theme.get("BG", BG))
+        self._base = base_color
+        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+        self.setAutoFillBackground(True)
+        pal = self.palette()
+        pal.setColor(self.backgroundRole(), base_color)
+        self.setPalette(pal)
+        self.update()
+
+    def set_theme(self, theme: dict[str, str]):
+        self._theme = theme or active_theme()
+        self._apply_theme()
+
 
 class GuideSplitter(QSplitter):
-    def __init__(self, orientation: Qt.Orientation, parent=None, *, snap_targets=None, snap_tolerance: float = 0.03):
+    def __init__(self, orientation: Qt.Orientation, parent=None, *, snap_targets=None, snap_tolerance: float = 0.03, theme: dict[str, str] | None = None):
         super().__init__(orientation, parent)
         self._snap_targets = sorted(snap_targets or (0.25, 0.5, 0.75))
         self._snap_tolerance = float(max(0.005, snap_tolerance))
         self._active_ratio: float | None = None
         self._active_handle_index: int | None = None
+        self._theme = theme or active_theme()
         # Live resize with no rubber-band painter
         self.setOpaqueResize(True)
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
         self.setAutoFillBackground(True)
-        pal = self.palette()
-        pal.setColor(self.backgroundRole(), QColor(BG))
-        self.setPalette(pal)
+        self._apply_theme()
         try:
             self.setRubberBand(-1)
         except Exception:
             pass
-        self.setStyleSheet(
-            f"QSplitter {{ background: {BG}; }}"
-            "QSplitter::handle { background: transparent; border: none; image: none; }"
-            "QSplitter::rubberBand { background: transparent; border: none; }"
-        )
         self._flash_timer = QTimer(self)
         self._flash_timer.setSingleShot(True)
         self._flash_timer.timeout.connect(self._clear_active_ratio)
@@ -658,8 +788,31 @@ class GuideSplitter(QSplitter):
         except Exception:
             pass
 
+    def _apply_theme(self):
+        bg = self._theme.get("BG", BG)
+        pal = self.palette()
+        pal.setColor(self.backgroundRole(), QColor(bg))
+        self.setPalette(pal)
+        try:
+            self.setStyleSheet(
+                f"QSplitter {{ background: {bg}; }}"
+                "QSplitter::handle { background: transparent; border: none; image: none; }"
+                "QSplitter::rubberBand { background: transparent; border: none; }"
+            )
+        except Exception:
+            pass
+        for idx in range(1, self.count()):
+            handle = self.handle(idx)
+            if isinstance(handle, GuideSplitterHandle):
+                handle.set_theme(self._theme)
+
+    def set_theme(self, theme: dict[str, str]):
+        self._theme = theme or active_theme()
+        self._apply_theme()
+        self.update()
+
     def createHandle(self):
-        return GuideSplitterHandle(self.orientation(), self)
+        return GuideSplitterHandle(self.orientation(), self, theme=self._theme)
 
     # --- Internal helpers -------------------------------------------------
     def _pane_records(self) -> list[tuple[int, QWidget, int]]:
@@ -833,7 +986,7 @@ class GuideSplitter(QSplitter):
         geo = handle.geometry()
         center = geo.center()
         painter = QPainter(self)
-        accent = QColor(ACCENT)
+        accent = QColor(self._theme.get("ACCENT", ACCENT))
         pen = QPen(accent)
         pen.setStyle(Qt.CustomDashLine)
         pen.setDashPattern([2, 4])
@@ -946,9 +1099,12 @@ class AspectRatioContainer(QWidget):
     def aspect_ratio(self) -> tuple[int, int]:
         return self._ratio_w, self._ratio_h
 
-    def _apply_border_style(self):
-        border = f"{self._border_px}px solid #333" if self._show_border else "none"
-        self.setStyleSheet(f"background: {BG}; border: {border};")
+    def _apply_border_style(self, theme: dict[str, str] | None = None):
+        palette = theme or active_theme()
+        border_color = palette.get("BORDER", BORDER)
+        bg = palette.get("BG", BG)
+        border = f"{self._border_px}px solid {border_color}" if self._show_border else "none"
+        self.setStyleSheet(f"background: {bg}; border: {border};")
 
     def set_border_visible(self, on: bool):
         self._show_border = bool(on)
@@ -959,6 +1115,9 @@ class AspectRatioContainer(QWidget):
         except Exception:
             pass
         self.update()
+
+    def set_theme(self, theme: dict[str, str]):
+        self._apply_border_style(theme)
 
     def border_visible(self) -> bool:
         return bool(getattr(self, "_show_border", True))
@@ -1010,14 +1169,8 @@ class AppZoomView(QGraphicsView):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.horizontalScrollBar().setVisible(False)
         self.verticalScrollBar().setVisible(False)
-        self.setStyleSheet("""
-            QScrollBar:vertical { width: 6px; background: transparent; margin: 2px; }
-            QScrollBar::handle:vertical { background: #2a2f36; border-radius: 3px; }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; background: transparent; }
-            QScrollBar:horizontal { height: 6px; background: transparent; margin: 2px; }
-            QScrollBar::handle:horizontal { background: #2a2f36; border-radius: 3px; }
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; background: transparent; }
-        """)
+        self._scrollbar_style = self._build_scrollbar_style(SCROLLBAR)
+        self._apply_scrollbar_style()
         # State
         self._scale = 1.0
         self._min_scale = 1.0
@@ -1029,6 +1182,32 @@ class AppZoomView(QGraphicsView):
             self.grabGesture(Qt.PinchGesture)
         except Exception:
             pass
+
+    def _build_scrollbar_style(self, color: str) -> str:
+        return (
+            "QScrollBar:vertical { width: 6px; background: transparent; margin: 2px; }\n"
+            f"QScrollBar::handle:vertical {{ background: {color}; border-radius: 3px; }}\n"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; background: transparent; }\n"
+            "QScrollBar:horizontal { height: 6px; background: transparent; margin: 2px; }\n"
+            f"QScrollBar::handle:horizontal {{ background: {color}; border-radius: 3px; }}\n"
+            "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; background: transparent; }\n"
+        )
+
+    def _apply_scrollbar_style(self):
+        try:
+            self.setStyleSheet(self._scrollbar_style)
+        except Exception:
+            pass
+
+    def set_theme(self, theme: dict[str, str]):
+        bg_color = theme.get("BG", self._bg_color)
+        try:
+            self.setBackgroundBrush(QColor(bg_color))
+        except Exception:
+            pass
+        self._bg_color = bg_color
+        self._scrollbar_style = self._build_scrollbar_style(theme.get("SCROLLBAR", SCROLLBAR))
+        self._apply_scrollbar_style()
 
     def set_content(self, w: QWidget):
         self._scene.clear()
@@ -1184,6 +1363,16 @@ class PinnedPreviewWindow(QWidget):
         layout.addWidget(self.container)
         self.resize(420, 236)
 
+    def set_theme(self, theme: dict[str, str]):
+        try:
+            self.view.set_theme(theme)
+        except Exception:
+            pass
+        try:
+            self.container.set_theme(theme)
+        except Exception:
+            pass
+
     def set_pixmap(self, pixmap: QPixmap):
         self.view.set_image(pixmap)
 
@@ -1208,6 +1397,9 @@ class App(QWidget):
     class StyledCombo(QComboBox):
         def __init__(self, popup_qss: str = "", *args, **kwargs):
             super().__init__(*args, **kwargs)
+            self._popup_qss = popup_qss
+
+        def set_popup_qss(self, popup_qss: str):
             self._popup_qss = popup_qss
 
         def showPopup(self):
@@ -1264,6 +1456,282 @@ class App(QWidget):
             # Now open the popup
             super().showPopup()
 
+    def _build_combo_popup_qss(self) -> str:
+        palette = self._theme
+        bg = palette.get("MID", MID)
+        text = palette.get("TEXT", TEXT)
+        border = palette.get("BORDER", BORDER)
+        accent = palette.get("ACCENT", ACCENT)
+        base = palette.get("BG", BG)
+        return (
+            "QListView {"
+            f"background: {bg};"
+            f"color: {text};"
+            f"border: 1px solid {border};"
+            "border-radius: 0px;"
+            "padding: 4px 0;"
+            "outline: none;"
+            "}"
+            "QListView::item {"
+            "padding: 6px 12px;"
+            "background: transparent;"
+            "}"
+            "QListView::item:selected {"
+            f"background: {accent};"
+            f"color: {base};"
+            "}"
+        )
+
+    def _refresh_combo_styles(self):
+        popup_qss = self._build_combo_popup_qss()
+        for combo in (getattr(self, "mode", None), getattr(self, "stepsize", None)):
+            if combo is None:
+                continue
+            try:
+                combo.set_popup_qss(popup_qss)
+            except Exception:
+                pass
+
+    def _refresh_branding_styles(self):
+        if hasattr(self, "logo_footer") and self.logo_footer:
+            if self.logo_footer.pixmap() is None:
+                try:
+                    self.logo_footer.setStyleSheet(f"color: {ACCENT}; font-size: 16pt; font-weight: bold;")
+                except Exception:
+                    pass
+        if hasattr(self, "logo_tagline") and self.logo_tagline:
+            try:
+                self.logo_tagline.setStyleSheet(
+                    f"color: {TEXT}; font-size: 10pt; font-weight: normal;"
+                )
+            except Exception:
+                pass
+
+    def _refresh_recording_indicator(self):
+        if not hasattr(self, "rec_indicator"):
+            return
+        if getattr(self, "_recording_active", False):
+            try:
+                self.rec_indicator.setText("● REC ON")
+                self.rec_indicator.setStyleSheet(f"color:{DANGER}; font-weight:bold;")
+            except Exception:
+                pass
+        else:
+            try:
+                self.rec_indicator.setText("● REC OFF")
+                self.rec_indicator.setStyleSheet(f"color:{SUBTXT};")
+            except Exception:
+                pass
+
+    def _apply_theme_to_widgets(self):
+        theme = self._theme
+        try:
+            self.video_view.set_theme(theme)
+        except Exception:
+            pass
+        try:
+            self.app_view.set_theme(theme)
+        except Exception:
+            pass
+        try:
+            self.video_area.set_theme(theme)
+        except Exception:
+            pass
+        if hasattr(self, "chart_frame") and self.chart_frame:
+            try:
+                self.chart_frame.setStyleSheet(f"background: {BG}; border: 1px solid {BORDER};")
+            except Exception:
+                pass
+        try:
+            self.live_chart.set_theme(theme)
+        except Exception:
+            pass
+        try:
+            self.splitter.set_theme(theme)
+        except Exception:
+            pass
+        for pane in (getattr(self, "_left_widget", None), getattr(self, "_right_widget", None)):
+            if pane is None:
+                continue
+            try:
+                pal = pane.palette()
+                pal.setColor(pane.backgroundRole(), QColor(BG))
+                pane.setPalette(pal)
+            except Exception:
+                pass
+        if getattr(self, "_pip_window", None):
+            try:
+                self._pip_window.set_theme(theme)
+            except Exception:
+                pass
+        try:
+            if sys.platform == "darwin":
+                _set_macos_titlebar_appearance(self, QColor(BG))
+        except Exception:
+            pass
+        try:
+            self._apply_titlebar_theme()
+        except Exception:
+            pass
+        self._update_mirror_layout()
+
+    def _sync_logo_menu_checks(self):
+        if hasattr(self, "_action_light_mode") and self._action_light_mode:
+            try:
+                self._action_light_mode.blockSignals(True)
+                self._action_light_mode.setChecked(self._theme_name == "light")
+                self._action_light_mode.blockSignals(False)
+            except Exception:
+                pass
+        if hasattr(self, "_action_mirror_mode") and self._action_mirror_mode:
+            try:
+                self._action_mirror_mode.blockSignals(True)
+                self._action_mirror_mode.setChecked(self._mirror_mode)
+                self._action_mirror_mode.blockSignals(False)
+            except Exception:
+                pass
+
+    def _apply_theme(self, name: str):
+        if name == self._theme_name:
+            return
+        old_bg = None
+        try:
+            if hasattr(self, "_theme") and self._theme:
+                old_bg = self._theme.get("BG", BG)
+        except Exception:
+            old_bg = BG
+        theme = set_active_theme(name)
+        self._theme_name = name
+        self._theme = dict(theme)
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                app.setStyleSheet(build_stylesheet(_FONT_FAMILY, self.ui_scale))
+            except Exception:
+                pass
+        self._refresh_combo_styles()
+        self._apply_theme_to_widgets()
+        self._refresh_branding_styles()
+        self._refresh_recording_indicator()
+        self._sync_logo_menu_checks()
+        if old_bg:
+            self._start_theme_transition(old_bg)
+
+    def _set_mirror_mode(self, enabled: bool):
+        enabled = bool(enabled)
+        if enabled == self._mirror_mode:
+            return
+        self._mirror_mode = enabled
+        self._update_mirror_layout()
+        self._sync_logo_menu_checks()
+
+    def _update_mirror_layout(self):
+        split = getattr(self, "splitter", None)
+        left = getattr(self, "_left_widget", None)
+        right = getattr(self, "_right_widget", None)
+        if split is None or left is None or right is None:
+            return
+        desired = (right, left) if self._mirror_mode else (left, right)
+        try:
+            current_sizes = split.sizes()
+        except Exception:
+            current_sizes = []
+        current_order: list[QWidget] = []
+        try:
+            for i in range(split.count()):
+                widget = split.widget(i)
+                if widget is not None:
+                    current_order.append(widget)
+        except Exception:
+            current_order = []
+        size_map: dict[QWidget, int] = {}
+        for idx, widget in enumerate(current_order):
+            if idx < len(current_sizes):
+                size_map[widget] = current_sizes[idx]
+        for idx, widget in enumerate(desired):
+            current_idx = split.indexOf(widget)
+            if current_idx == -1 or current_idx == idx:
+                continue
+            try:
+                split.blockSignals(True)
+                split.insertWidget(idx, widget)
+            finally:
+                split.blockSignals(False)
+        new_sizes: list[int] = []
+        if desired:
+            for idx, widget in enumerate(desired):
+                size = size_map.get(widget)
+                if size is None and idx < len(current_sizes):
+                    size = current_sizes[idx]
+                if size is None:
+                    size = 0
+                new_sizes.append(int(size))
+        if new_sizes and any(new_sizes):
+            try:
+                split.setSizes(new_sizes)
+            except Exception:
+                pass
+        try:
+            split.setStretchFactor(0, 1)
+            split.setStretchFactor(1, 1)
+        except Exception:
+            pass
+
+    def _start_theme_transition(self, from_color: str | QColor | None):
+        if not from_color:
+            return
+        try:
+            color = QColor(from_color)
+            if not color.isValid():
+                raise ValueError
+        except Exception:
+            color = QColor(BG)
+        prev_anim = getattr(self, "_theme_overlay_anim", None)
+        if prev_anim is not None:
+            try:
+                prev_anim.stop()
+            except Exception:
+                pass
+            self._theme_overlay_anim = None
+        overlay = getattr(self, "_theme_overlay", None)
+        if overlay is not None:
+            try:
+                overlay.deleteLater()
+            except Exception:
+                pass
+            self._theme_overlay = None
+        overlay = QWidget(self)
+        overlay.setObjectName("ThemeTransitionOverlay")
+        overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        overlay.setAutoFillBackground(True)
+        pal = overlay.palette()
+        pal.setColor(overlay.backgroundRole(), color)
+        overlay.setPalette(pal)
+        overlay.setGeometry(self.rect())
+        overlay.show()
+        overlay.raise_()
+        effect = QGraphicsOpacityEffect(overlay)
+        overlay.setGraphicsEffect(effect)
+        effect.setOpacity(1.0)
+        anim = QPropertyAnimation(effect, b"opacity", overlay)
+        anim.setDuration(500)
+        anim.setStartValue(1.0)
+        anim.setEndValue(0.0)
+        anim.setEasingCurve(QEasingCurve.InOutQuad)
+
+        def _cleanup():
+            try:
+                overlay.deleteLater()
+            except Exception:
+                pass
+            self._theme_overlay = None
+            self._theme_overlay_anim = None
+
+        anim.finished.connect(_cleanup)
+        anim.start(QAbstractAnimation.DeleteWhenStopped)
+        self._theme_overlay = overlay
+        self._theme_overlay_anim = anim
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"NEMESIS {APP_VERSION} — Non-periodic Event Monitoring & Evaluation of Stimulus-Induced States")
@@ -1273,6 +1741,11 @@ class App(QWidget):
         self.ui_scale = 1.0
         # Bring back a sensible minimum window size to avoid collapsing
         self.setMinimumSize(900, 540)
+        self._theme_name = _ACTIVE_THEME_NAME
+        self._theme = dict(active_theme())
+        self._mirror_mode = True
+        self._theme_overlay: QWidget | None = None
+        self._theme_overlay_anim: QPropertyAnimation | None = None
 
         # ---------- Top dense status line + inline logo ----------
         header_row = QHBoxLayout()
@@ -1284,7 +1757,7 @@ class App(QWidget):
         header_row.addWidget(self.statusline, 1)
 
         # ---------- Video preview (zoomable/pannable) ----------
-        self.video_view = ZoomView(bg_color=BG)
+        self.video_view = ZoomView(bg_color=self._theme.get("BG", BG))
         try:
             self.video_view.firstFrame.connect(self._on_preview_first_frame)
         except Exception:
@@ -1300,7 +1773,12 @@ class App(QWidget):
         self.video_view.setMinimumSize(480, 270)
 
         # ---------- Serial controls ----------
-        self.port_edit = QLineEdit(); self.port_edit.setPlaceholderText("COM3 or /dev/ttyUSB0")
+        self.port_edit = QComboBox()
+        self.port_edit.setEditable(True)
+        self.port_edit.setInsertPolicy(QComboBox.NoInsert)
+        self.port_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.port_edit.lineEdit().setPlaceholderText("COM3 or /dev/ttyUSB0")
+        self._refresh_serial_ports(initial=True)
         self.serial_btn = QPushButton("Connect Serial")
         self.enable_btn = QPushButton("Enable Motor")
         self.disable_btn = QPushButton("Disable Motor")
@@ -1319,26 +1797,10 @@ class App(QWidget):
         self.rec_start_btn = QPushButton("Start Recording")
         self.rec_stop_btn  = QPushButton("Stop Recording")
         self.rec_indicator = QLabel("● REC OFF")
+        self._recording_active = False
 
         # ---------- Scheduler controls ----------
-        popup_qss = f"""
-            QListView {{
-                background: {MID};
-                color: {TEXT};
-                border: 1px solid {BG};
-                border-radius: 0px;
-                padding: 4px 0;
-                outline: none;
-            }}
-            QListView::item {{
-                padding: 6px 12px;
-                background: transparent;
-            }}
-            QListView::item:selected {{
-                background: {ACCENT};
-                color: {BG};
-            }}
-        """
+        popup_qss = self._build_combo_popup_qss()
         self.mode = App.StyledCombo(popup_qss=popup_qss); self.mode.addItems(["Periodic", "Poisson"])
         # Stabilize width and style popup to avoid clipping
         self.mode.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
@@ -1363,7 +1825,9 @@ class App(QWidget):
         self.lambda_rpm.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
         # Stepsize (1..5) — sent to firmware, logged per-tap
-        self.stepsize = App.StyledCombo(popup_qss=popup_qss); self.stepsize.addItems(["1 (Full Step)","2 (Half Step)","3 (1/4 Step)","4 (1/8 Step)","5 (1/16 Step)"]); self.stepsize.setCurrentText("4")
+        self.stepsize = App.StyledCombo(popup_qss=popup_qss)
+        self.stepsize.addItems(["-", "1 (Full Step)","2 (Half Step)","3 (1/4 Step)","4 (1/8 Step)","5 (1/16 Step)"])
+        self.stepsize.setCurrentIndex(0)
         self.stepsize.currentTextChanged.connect(self._on_stepsize_changed)
         # Apply same styled popup to stepsize combobox
         sv = QListView(); self.stepsize.setView(sv)
@@ -1397,6 +1861,9 @@ class App(QWidget):
         # Config Save/Load
         self.save_cfg_btn = QPushButton("Save Config")
         self.load_cfg_btn = QPushButton("Load Last Config")
+        self.flash_config_btn = QPushButton("Flash Hardware Config")
+        self.flash_config_btn.setToolTip("Send the current mode, step size, and timing to the controller without starting a run")
+        self.flash_config_btn.clicked.connect(self._flash_hardware_config)
 
         # Pro Mode (keyboard-first interaction)
         self.pro_btn = QPushButton("Pro Mode: OFF")
@@ -1405,11 +1872,11 @@ class App(QWidget):
         self.pro_mode = False
 
         # Live chart (template-like raster): embedded Matplotlib, Typestar font
-        self.live_chart = LiveChart(font_family=_FONT_FAMILY)
+        self.live_chart = LiveChart(font_family=_FONT_FAMILY, theme=self._theme)
         # Wrap chart in a framed panel to match other boxes (use BG to match general background)
         self.chart_frame = QFrame()
         # Match the video preview container styling exactly
-        self.chart_frame.setStyleSheet(f"background: {BG}; border: 1px solid #333;")
+        self.chart_frame.setStyleSheet(f"background: {BG}; border: 1px solid {BORDER};")
         self.chart_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         chart_layout = QVBoxLayout(self.chart_frame)
         chart_layout.setContentsMargins(0, 0, 0, 0)
@@ -1495,7 +1962,7 @@ class App(QWidget):
                         if edge:
                             break
                     if edge:
-                        outline.setPixelColor(x, y, QColor("#333"))
+                        outline.setPixelColor(x, y, QColor(OUTLINE))
 
             composed = QPixmap(w, h)
             composed.fill(Qt.transparent)
@@ -1510,8 +1977,21 @@ class App(QWidget):
         self.logo_footer.setContentsMargins(0, 0, 0, 0)
         self.logo_footer.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.logo_footer.setCursor(Qt.PointingHandCursor)
-        self.logo_footer.setToolTip("Open update notes")
-        self.logo_footer.mousePressEvent = self._logo_clicked
+        self.logo_footer.setToolTip("Show quick actions")
+        self.logo_footer.mousePressEvent = self._logo_pressed
+
+        current_year = time.localtime().tm_year
+        self.logo_tagline = QLabel(f"© {current_year} California Numerics")
+        self.logo_tagline.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.logo_tagline.setTextFormat(Qt.PlainText)
+        self.logo_tagline.setTextInteractionFlags(Qt.NoTextInteraction)
+        self.logo_tagline.setStyleSheet(
+            f"color: {TEXT}; font-size: 10pt; font-weight: normal;"
+        )
+        self.logo_tagline.setContentsMargins(0, 4, 0, 0)
+        self.logo_tagline.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+
+        self.logo_menu = self._build_logo_menu()
         serial_status_row.addStretch(1)  # keep status text left-aligned
 
         # ---------- Layout ----------
@@ -1593,6 +2073,8 @@ class App(QWidget):
         mode_section.setContentsMargins(0, 0, 0, 0)
         mode_section.setSpacing(6)
         mode_section.addLayout(controls_grid)
+        flash_row = QHBoxLayout(); flash_row.setContentsMargins(0, 0, 0, 0); flash_row.addWidget(self.flash_config_btn, 1)
+        mode_section.addLayout(flash_row)
 
         # Seed / run / output configuration cluster
         r3b = QHBoxLayout(); r3b.addWidget(QLabel("Seed:")); r3b.addWidget(self.seed_edit,1)
@@ -1601,6 +2083,7 @@ class App(QWidget):
 
         # Config save/load row (was missing from layout)
         r5b = QHBoxLayout(); r5b.addWidget(self.save_cfg_btn); r5b.addWidget(self.load_cfg_btn)
+        r5c = QHBoxLayout(); r5c.addWidget(self.flash_config_btn, 1)
 
         io_section = QVBoxLayout()
         io_section.setContentsMargins(0, 0, 0, 0)
@@ -1623,7 +2106,12 @@ class App(QWidget):
         logo_section.setSpacing(0)
         logo_row = QHBoxLayout()
         logo_row.setContentsMargins(0, 8, 0, 0)  # small gap above helps line up with chart base
-        logo_row.addWidget(self.logo_footer, 0, Qt.AlignBottom | Qt.AlignLeft)
+        logo_block = QVBoxLayout()
+        logo_block.setContentsMargins(0, 0, 0, 0)
+        logo_block.setSpacing(2)
+        logo_block.addWidget(self.logo_footer, 0, Qt.AlignLeft | Qt.AlignBottom)
+        logo_block.addWidget(self.logo_tagline, 0, Qt.AlignLeft | Qt.AlignTop)
+        logo_row.addLayout(logo_block)
         logo_row.addStretch(1)
         logo_section.addLayout(logo_row)
         logo_section.addStretch(1)
@@ -1667,7 +2155,7 @@ class App(QWidget):
             rightw.setMinimumWidth(360)
         except Exception:
             pass
-        splitter = GuideSplitter(Qt.Horizontal, snap_targets=(0.25, 0.5, 0.75))
+        splitter = GuideSplitter(Qt.Horizontal, snap_targets=(0.25, 0.5, 0.75), theme=self._theme)
         splitter.addWidget(leftw)
         splitter.addWidget(rightw)
         splitter.setChildrenCollapsible(False)
@@ -1687,11 +2175,12 @@ class App(QWidget):
         except Exception:
             pass
 
+        self._left_widget = leftw
         self.splitter = splitter
 
         # Wrap entire UI content in a zoomable view for browser-like zoom
         contentw = QWidget(); content_layout = QHBoxLayout(contentw); content_layout.setContentsMargins(0,0,0,0); content_layout.addWidget(splitter)
-        self.app_view = AppZoomView(bg_color=BG)
+        self.app_view = AppZoomView(bg_color=self._theme.get("BG", BG))
         self.app_view.set_content(contentw)
         # Enforce a minimum window size that encompasses the full UI content
         try:
@@ -1711,6 +2200,11 @@ class App(QWidget):
         QTimer.singleShot(0, self._apply_titlebar_theme)
         QTimer.singleShot(0, self._init_splitter_balance)
         QTimer.singleShot(0, self._update_section_spacers)
+        self._refresh_combo_styles()
+        self._refresh_branding_styles()
+        self._refresh_recording_indicator()
+        self._sync_logo_menu_checks()
+        self._update_mirror_layout()
 
         # ---------- State ----------
         self.cap = None
@@ -1725,9 +2219,17 @@ class App(QWidget):
         self.run_start = None
         self.taps = 0; self.preview_fps = 30; self.current_stepsize = 4
         self._pip_window: PinnedPreviewWindow | None = None
+        self._hardware_run_active = False
+        self._awaiting_switch_start = False
+        self._hardware_configured = False
+        self._hardware_config_message = ""
+        self._pending_run_metadata: dict[str, object] | None = None
+        self._last_hw_tap_ms: float | None = None
+        self._flash_only_mode = False
 
         # Dense status line updater
         self.status_timer = QTimer(self); self.status_timer.timeout.connect(self._refresh_statusline); self.status_timer.start(400)
+        self.serial_timer = QTimer(self); self.serial_timer.setInterval(50); self.serial_timer.timeout.connect(self._drain_serial_queue)
 
         # ---------- Signals ----------
         self.cam_btn.clicked.connect(self._open_camera)
@@ -1782,15 +2284,52 @@ class App(QWidget):
         except Exception:
             pass
 
-    def _logo_clicked(self, _event):
+    def _build_logo_menu(self) -> QMenu:
+        menu = QMenu(self)
+        menu.setObjectName("logoQuickActions")
+        self._action_light_mode = menu.addAction("Light Mode")
+        self._action_light_mode.setCheckable(True)
+        self._action_light_mode.triggered.connect(self._on_light_mode_triggered)
+
+        self._action_mirror_mode = menu.addAction("Mirror Mode")
+        self._action_mirror_mode.setCheckable(True)
+        self._action_mirror_mode.triggered.connect(self._on_mirror_mode_triggered)
+
+        menu.addSeparator()
+        action_site = menu.addAction("Visit California Numerics")
+        action_site.triggered.connect(lambda: QDesktopServices.openUrl(QUrl("https://californianumerics.com")))
+        QTimer.singleShot(0, self._sync_logo_menu_checks)
+        return menu
+
+    def _logo_pressed(self, event):
         try:
-            QDesktopServices.openUrl(QUrl("https://californianumerics.com"))
+            button = event.button()
         except Exception:
-            pass
+            button = Qt.LeftButton
+        if button != Qt.LeftButton:
+            return
+        if not hasattr(self, "logo_menu") or self.logo_menu is None:
+            return
+        global_pos = self.logo_footer.mapToGlobal(QPoint(0, self.logo_footer.height()))
+        self.logo_menu.exec(global_pos)
+
+    def _on_light_mode_triggered(self, checked: bool):
+        target = "light" if checked else "dark"
+        self._apply_theme(target)
+
+    def _on_mirror_mode_triggered(self, checked: bool):
+        self._set_mirror_mode(checked)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._update_section_spacers()
+        overlay = getattr(self, "_theme_overlay", None)
+        if overlay is not None:
+            try:
+                overlay.setGeometry(self.rect())
+                overlay.raise_()
+            except Exception:
+                pass
 
     def eventFilter(self, obj, ev):
         # Global pinch-zoom + browser parity shortcuts
@@ -1903,14 +2442,15 @@ class App(QWidget):
         self._apply_stepsize(val)
 
     def _apply_stepsize(self, val: int):
-        val = max(1, min(val, 5))
+        if val not in (1,2,3,4,5):
+            self.current_stepsize = 4
+            return
         self.current_stepsize = val
         self.stepsize.blockSignals(True)
         try:
-            self.stepsize.setCurrentIndex(val-1)
+            self.stepsize.setCurrentIndex(val)
         finally:
             self.stepsize.blockSignals(False)
-        # Send '1'..'5' to firmware; Arduino code already maps this to microstepping profile
         self._send_serial_char(str(val), "Set stepsize")
 
     def _reset_serial_indicator(self, note: str | None = None):
@@ -1928,6 +2468,205 @@ class App(QWidget):
         if hasattr(self, "serial_status"):
             self.serial_status.setText(text)
 
+    # ---------- Hardware serial processing ----------
+
+    def _drain_serial_queue(self):
+        if not self.serial.is_open():
+            return
+        while True:
+            line = self.serial.read_line_nowait()
+            if line is None:
+                break
+            cleaned = line.strip()
+            if not cleaned:
+                continue
+            self._handle_serial_line(cleaned)
+
+    def _handle_serial_line(self, line: str):
+        self._hardware_config_message = line
+        if line.startswith("EVENT:"):
+            payload = line[6:]
+            event, _, data = payload.partition(',')
+            self._handle_hardware_event(event.strip().upper(), data.strip())
+            return
+        if line.startswith("CONFIG:"):
+            self._handle_hardware_config_message(line)
+            return
+        if hasattr(self, "serial_status"):
+            self.serial_status.setText(f"HW → {line}")
+
+    def _handle_hardware_config_message(self, line: str):
+        if line.startswith("CONFIG:OK"):
+            self._hardware_configured = True
+            if hasattr(self, "serial_status"):
+                self.serial_status.setText(line)
+            if self._awaiting_switch_start:
+                self._update_status("Hardware configured. Flip the switch ON to begin.")
+        elif line.startswith("CONFIG:ERR"):
+            self._hardware_configured = False
+            self._awaiting_switch_start = False
+            if hasattr(self, "serial_status"):
+                self.serial_status.setText(line)
+            self._update_status(f"Hardware configuration failed: {line}")
+            if self.logger or self._pending_run_metadata is not None:
+                self._stop_run(from_hardware=True, reason="Hardware configuration failed.")
+        elif line.startswith("CONFIG:STEPSIZE"):
+            if hasattr(self, "serial_status"):
+                self.serial_status.setText(line)
+        elif line.startswith("CONFIG:DONE"):
+            if hasattr(self, "serial_status"):
+                self.serial_status.setText(line)
+            if self._awaiting_switch_start:
+                self._update_status("Hardware ready. Flip the switch to begin.")
+
+    def _handle_hardware_event(self, event: str, data: str):
+        if event == "SWITCH":
+            if hasattr(self, "serial_status"):
+                self.serial_status.setText(f"Switch {data.upper() if data else '?'}")
+            if self._awaiting_switch_start and data.upper() == "ON":
+                self._update_status("Switch ON detected. Waiting for hardware activation…")
+            return
+        if event == "MODE_ACTIVATED":
+            self._on_hardware_run_started()
+            return
+        if event == "MODE_DEACTIVATED":
+            self._on_hardware_run_stopped()
+            return
+        if event == "TAP":
+            self._on_hardware_tap(data)
+
+    def _compose_hardware_config(self) -> tuple[str, dict[str, object]]:
+        mode_text = self.mode.currentText()
+        mode_token = 'P' if mode_text == "Periodic" else 'R'
+        stepsize = max(1, min(int(self.current_stepsize), 5))
+        period_s = float(self.period_sec.value())
+        lambda_rpm = float(self.lambda_rpm.value())
+        if mode_token == 'P':
+            period_s = max(0.001, period_s)
+            config_value = f"{period_s:.6f}"
+        else:
+            lambda_rpm = max(0.01, lambda_rpm)
+            config_value = f"{lambda_rpm:.6f}"
+        message = f"C,{mode_token},{stepsize},{config_value}\n"
+        meta = {
+            "mode": mode_token,
+            "mode_label": mode_text,
+            "stepsize": stepsize,
+            "value": config_value,
+            "period_sec": period_s,
+            "lambda_rpm": lambda_rpm,
+            "seed": self._seed_value_or_none(),
+            "outdir": self.outdir_edit.text().strip() or os.getcwd(),
+            "rec_path": getattr(self.recorder, "path", ""),
+            "timestamp": time.strftime("%Y%m%d_%H%M%S"),
+        }
+        return message, meta
+
+    def _on_hardware_run_started(self):
+        if self.logger is None and not self._flash_only_mode:
+            self._initialize_run_logger()
+        self._hardware_run_active = True
+        self._awaiting_switch_start = False
+        self._last_hw_tap_ms = None
+        self.taps = 0
+        self.run_start = time.monotonic()
+        self.counters.setText("Taps: 0 | Elapsed: 0.0 s | Observed rate: 0.0 /min")
+        try:
+            self.live_chart.reset()
+        except Exception:
+            pass
+        if self.logger is None:
+            self._update_status("Hardware run active (not logging). Press Start Run to capture data.")
+        else:
+            self._update_status("Hardware run active.")
+        self._flash_only_mode = False
+
+    def _on_hardware_run_stopped(self):
+        if not self._hardware_run_active and not self._awaiting_switch_start:
+            return
+        self._hardware_run_active = False
+        self._awaiting_switch_start = False
+        self._last_hw_tap_ms = None
+        self._stop_run(from_hardware=True, reason="Hardware run stopped.")
+
+    def _on_hardware_tap(self, data: str):
+        if not self._hardware_run_active:
+            return
+        host_now = time.monotonic()
+        if self.run_start is None:
+            self.run_start = host_now
+        elapsed = host_now - self.run_start
+        self.taps += 1
+        rate = (self.taps / elapsed * 60.0) if elapsed > 0 else 0.0
+        self.counters.setText(f"Taps: {self.taps} | Elapsed: {elapsed:.1f} s | Observed rate: {rate:.2f} /min")
+        try:
+            self.live_chart.add_tap(elapsed)
+        except Exception:
+            pass
+        try:
+            self._last_hw_tap_ms = float(data) if data else None
+        except Exception:
+            self._last_hw_tap_ms = None
+        if self.logger:
+            note = f"hw_ms={data}" if data else None
+            self.logger.log_tap(host_time_s=host_now, mode=self.mode.currentText(), mark="hardware", stepsize=self.current_stepsize, notes=note)
+
+    def _initialize_run_logger(self, force: bool = False):
+        if self.logger is not None and not force:
+            return
+        meta = self._pending_run_metadata or {}
+        outdir = meta.get("outdir") or (self.outdir_edit.text().strip() or os.getcwd())
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        if force and self.logger is not None:
+            try:
+                self.logger.close()
+            except Exception:
+                pass
+            self.logger = None
+        run_token = uuid.uuid4().hex[:6].upper()
+        run_dir = Path(outdir) / f"run_{ts}_{run_token}"
+        try:
+            run_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            self._update_status(f"Failed to create run directory: {exc}")
+            return
+        rec_path = meta.get("rec_path") or getattr(self.recorder, "path", "")
+        self.logger = runlogger.RunLogger(run_dir, recording_path=rec_path)
+        self.run_dir = run_dir
+
+        seed = meta.get("seed", self._seed_value_or_none())
+        self.scheduler.set_seed(seed)
+        mode_token = meta.get("mode", 'P')
+        if mode_token == 'P':
+            self.scheduler.configure_periodic(meta.get("period_sec", float(self.period_sec.value())))
+        else:
+            self.scheduler.configure_poisson(meta.get("lambda_rpm", float(self.lambda_rpm.value())))
+
+        run_json = {
+            "run_id": self.logger.run_id,
+            "started_at": ts,
+            "app_version": APP_VERSION,
+            "firmware_commit": "",
+            "camera_index": self.cam_index.value(),
+            "recording_path": rec_path,
+            "serial_port": self.port_edit.text().strip(),
+            "mode": meta.get("mode_label", self.mode.currentText()),
+            "period_sec": meta.get("period_sec", float(self.period_sec.value())),
+            "lambda_rpm": meta.get("lambda_rpm", float(self.lambda_rpm.value())),
+            "seed": seed,
+            "stepsize": meta.get("stepsize", self.current_stepsize),
+            "scheduler": self.scheduler.descriptor(),
+            "hardware_trigger": "switch",
+            "config_source": meta.get("source", "unknown"),
+        }
+        try:
+            with open(run_dir / "run.json", "w", encoding="utf-8") as f:
+                json.dump(run_json, f, indent=2)
+        except Exception as exc:
+            self._update_status(f"Failed to write run.json: {exc}")
+        meta["run_id"] = self.logger.run_id
+        meta["outdir"] = str(outdir)
+        self._pending_run_metadata = meta
     def _send_serial_char(self, payload: str, note: str | None = None) -> bool:
         if not payload:
             return False
@@ -1996,18 +2735,30 @@ class App(QWidget):
     # ---------- Serial ----------
     def _toggle_serial(self):
         if not self.serial.is_open():
-            port = self.port_edit.text().strip()
-            if not port: self._update_status("Enter a serial port first."); return
+            port = self.port_edit.currentText().strip()
+            if not port:
+                port = self._auto_detect_serial_port()
+                if port:
+                    self.port_edit.setCurrentText(port)
+            if not port:
+                self._update_status("Enter a serial port first.")
+                return
             try:
                 self.serial.open(port, baudrate=9600, timeout=0)
                 self.serial_btn.setText("Disconnect Serial"); self._update_status(f"Serial connected on {port}.")
                 self._reset_serial_indicator("connected")
+                if not self.serial_timer.isActive():
+                    self.serial_timer.start()
             except Exception as e:
                 self._update_status(f"Serial error: {e}")
                 self._reset_serial_indicator("error")
         else:
             self.serial.close(); self.serial_btn.setText("Connect Serial"); self._update_status("Serial disconnected.")
             self._reset_serial_indicator("disconnected")
+            self.serial_timer.stop()
+            self._hardware_run_active = False
+            self._awaiting_switch_start = False
+            self._hardware_configured = False
 
     # ---------- Output dir ----------
     def _choose_outdir(self):
@@ -2035,13 +2786,17 @@ class App(QWidget):
         # If a run is already active, inject path into logger for subsequent rows
         if self.logger:
             self.logger.set_recording_path(str(actual_path))
-        self.rec_indicator.setText("● REC ON"); self.rec_indicator.setStyleSheet(f"color:{DANGER}; font-weight:bold;")
+        self.rec_indicator.setText("● REC ON")
+        self._recording_active = True
+        self.rec_indicator.setStyleSheet(f"color:{DANGER}; font-weight:bold;")
         self._update_status(f"Recording → {actual_path}")
 
     def _stop_recording(self):
         if self.recorder:
             self.recorder.close(); self.recorder = None
-            self.rec_indicator.setText("● REC OFF"); self.rec_indicator.setStyleSheet(f"color:{SUBTXT};")
+            self.rec_indicator.setText("● REC OFF")
+            self._recording_active = False
+            self.rec_indicator.setStyleSheet(f"color:{SUBTXT};")
             self._update_status("Recording stopped.")
 
     # ---------- Config Save/Load ----------
@@ -2104,64 +2859,116 @@ class App(QWidget):
         self.lambda_rpm.setToolTip("Adjust when Mode is set to Poisson")
 
     def _start_run(self):
+        if not self.serial.is_open():
+            QMessageBox.warning(self, "Serial", "Connect to the controller before starting a run.")
+            return
+        self._flash_only_mode = False
+        if self._hardware_run_active:
+            if self.logger is None:
+                if self._pending_run_metadata is None:
+                    self._pending_run_metadata = self._compose_hardware_config()[1]
+                self._initialize_run_logger(force=True)
+                self.run_start = time.monotonic()
+                self.taps = 0
+                self.counters.setText("Taps: 0 | Elapsed: 0.0 s | Observed rate: 0.0 /min")
+                try:
+                    self.live_chart.reset()
+                except Exception:
+                    pass
+                self._update_status("Logging enabled for active hardware run.")
+            else:
+                QMessageBox.information(self, "Run", "A hardware run is already active.")
+            self._awaiting_switch_start = False
+            return
+        if self._awaiting_switch_start:
+            self._update_status("Recording armed. Awaiting physical switch to begin logging.")
         if self.recorder is None:
             resp = QMessageBox.question(self, "No Recording Active",
                 "You're starting a run without recording video. Continue anyway?",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if resp == QMessageBox.No: return
-        outdir = self.outdir_edit.text().strip() or os.getcwd()
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        run_token = uuid.uuid4().hex[:6].upper()
-        run_id = f"run_{ts}_{run_token}"
-        self.run_dir = Path(outdir) / run_id
-        self.run_dir.mkdir(parents=True, exist_ok=True)
-        rec_path = getattr(self.recorder, "path", "") if self.recorder else ""
-        self.logger = runlogger.RunLogger(self.run_dir, run_id=run_id, recording_path=rec_path)
-        self.run_start = time.monotonic(); self.taps = 0
+            if resp == QMessageBox.No:
+                return
 
-        # Seed & scheduler config
-        seed = self._seed_value_or_none()
-        self.scheduler.set_seed(seed)
-        if self.mode.currentText()=="Periodic":
-            self.scheduler.configure_periodic(self.period_sec.value())
-        else:
-            self.scheduler.configure_poisson(self.lambda_rpm.value())
+        while self.serial.read_line_nowait() is not None:
+            pass
 
-        # Snapshot run.json
-        run_json = {
-            "run_id": self.logger.run_id,
-            "started_at": ts,
-            "app_version": APP_VERSION,
-            "firmware_commit": "",  # optional
-            "camera_index": self.cam_index.value(),
-            "recording_path": rec_path,
-            "serial_port": self.port_edit.text().strip(),
-            "mode": self.mode.currentText(),
-            "period_sec": self.period_sec.value(),
-            "lambda_rpm": self.lambda_rpm.value(),
-            "seed": seed,
-            "stepsize": self.current_stepsize,
-            "scheduler": self.scheduler.descriptor(),
-        }
-        try:
-            with open(self.run_dir/"run.json", "w", encoding="utf-8") as f:
-                json.dump(run_json, f, indent=2)
-        except Exception as e:
-            self._update_status(f"Failed to write run.json: {e}")
-
-        delay = self.scheduler.next_delay_s()
-        self.run_timer.start(int(delay*1000)); self._update_status(f"Run started → next tap in {delay:.3f}s")
-        # Reset live chart data
+        message, meta = self._compose_hardware_config()
+        self.serial.send_text(message)
+        self._record_serial_command("CONFIG", "Run config sent")
+        self._hardware_configured = False
+        self._awaiting_switch_start = True
+        self._hardware_run_active = False
+        self._last_hw_tap_ms = None
+        self.taps = 0
+        self.run_start = None
+        self.counters.setText("Taps: 0 | Elapsed: 0.0 s | Observed rate: 0.0 /min")
         try:
             self.live_chart.reset()
         except Exception:
             pass
+        try:
+            self.run_timer.stop()
+        except Exception:
+            pass
 
-    def _stop_run(self):
-        self.run_timer.stop()
-        if self.logger: self.logger.close(); self.logger = None
-        self.run_dir = None; self.run_start = None
-        self._update_status("Run stopped.")
+        meta["source"] = "start_run"
+        self._pending_run_metadata = meta
+        self._initialize_run_logger(force=True)
+        self._update_status("Configuration sent. Flip the switch ON to begin the run.")
+        self._send_serial_char('e', "Enable motor")
+
+    def _stop_run(self, *_args, from_hardware: bool = False, reason: str | None = None):
+        try:
+            self.run_timer.stop()
+        except Exception:
+            pass
+        if self.logger:
+            self.logger.close()
+            self.logger = None
+        self.run_dir = None
+        self.run_start = None
+        self._pending_run_metadata = None
+        if not from_hardware and self.serial.is_open():
+            self._send_serial_char('d', "Disable motor")
+        self._hardware_run_active = False
+        self._awaiting_switch_start = False
+        self._hardware_configured = False
+        self._last_hw_tap_ms = None
+        self.taps = 0
+        self._flash_only_mode = False
+        try:
+            self.live_chart.reset()
+        except Exception:
+            pass
+        self.counters.setText("Taps: 0 | Elapsed: 0.0 s | Observed rate: 0.0 /min")
+        message = reason or ("Hardware run stopped." if from_hardware else "Run stopped.")
+        self._update_status(message)
+
+    def _flash_hardware_config(self):
+        if not self.serial.is_open():
+            QMessageBox.warning(self, "Serial", "Connect to the controller before flashing the configuration.")
+            return
+        while self.serial.read_line_nowait() is not None:
+            pass
+        message, meta = self._compose_hardware_config()
+        self.serial.send_text(message)
+        self._record_serial_command("FLASH", "Config payload sent")
+        self._hardware_configured = False
+        self._awaiting_switch_start = True
+        self._hardware_run_active = False
+        self._flash_only_mode = True
+        meta["source"] = "flash"
+        self._pending_run_metadata = meta
+        self._last_hw_tap_ms = None
+        self.run_start = None
+        self.taps = 0
+        self.counters.setText("Taps: 0 | Elapsed: 0.0 s | Observed rate: 0.0 /min")
+        try:
+            self.live_chart.reset()
+        except Exception:
+            pass
+        self._update_status("Config flashed for testing. Flip the switch to move; press Start Run to log data.")
+        self._send_serial_char('e', "Enable motor")
 
     def _manual_tap(self): self._send_tap("manual")
 
@@ -2183,12 +2990,11 @@ class App(QWidget):
         self.counters.setText(f"Taps: {self.taps} | Elapsed: {elapsed:.1f} s | Observed rate: {rate:.2f} /min")
         if self.logger:
             self.logger.log_tap(host_time_s=t_host, mode=self.mode.currentText(), mark=mark, stepsize=self.current_stepsize)
-        # Update live chart (raster)
-        try:
-            if self.run_start:
+        if mark == "scheduled" and self.run_start:
+            try:
                 self.live_chart.add_tap(elapsed)
-        except Exception:
-            pass
+            except Exception:
+                pass
 
     # ---------- Frame loop ----------
     def _handle_frame(self, frame):
@@ -2229,7 +3035,12 @@ class App(QWidget):
             QMetaObject.invokeMethod(worker, "stop", Qt.QueuedConnection)
         if thread:
             thread.quit()
-            thread.wait(700)
+            if not thread.wait(2000):
+                try:
+                    thread.terminate()
+                except Exception:
+                    pass
+                thread.wait(200)
         self._cleanup_frame_stream()
 
     def _cleanup_frame_stream(self):
@@ -2252,7 +3063,7 @@ class App(QWidget):
         cam_idx = self.cam_index.value()
         fps = int(self.preview_fps or 0)
         rec = "REC ON" if self.recorder else "REC OFF"
-        port = self.port_edit.text().strip() if self.serial.is_open() else "—"
+        port = self.port_edit.currentText().strip() if self.serial.is_open() else "—"
         serial_state = f"serial:{port}" if self.serial.is_open() else "serial:DISCONNECTED"
         mode = self.mode.currentText()
         param = f"P={self.period_sec.value():.2f}s" if mode=="Periodic" else f"λ={self.lambda_rpm.value():.2f}/min"
@@ -2263,6 +3074,60 @@ class App(QWidget):
         self.statusline.setText(txt)
 
     def _update_status(self, msg): self.status.setText(msg)
+
+    def _auto_detect_serial_port(self) -> str | None:
+        try:
+            ports = list(list_ports.comports())
+        except Exception:
+            ports = []
+        if not ports:
+            return None
+        preferred = [
+            "cu.usbmodem", "tty.usbmodem", "cu.usbserial", "tty.usbserial",
+            "ttyacm", "ttyusb"
+        ]
+
+        def port_score(name: str) -> int:
+            lower = name.lower()
+            for idx, prefix in enumerate(preferred):
+                if prefix in lower:
+                    return len(preferred) - idx
+            if lower.startswith("com"):
+                return 1
+            return 0
+
+        best = None
+        best_score = -1
+        for info in ports:
+            name = info.device
+            score = port_score(name)
+            if score > best_score:
+                best_score = score
+                best = name
+        if best:
+            return best
+        return ports[0].device
+
+    def _refresh_serial_ports(self, initial: bool = False):
+        try:
+            ports = list(list_ports.comports())
+        except Exception:
+            ports = []
+        existing = {self.port_edit.itemText(i) for i in range(self.port_edit.count())}
+        for info in ports:
+            name = info.device
+            if name not in existing:
+                self.port_edit.addItem(name)
+                existing.add(name)
+        if initial and ports:
+            autodetected = self._auto_detect_serial_port()
+            if autodetected:
+                idx = self.port_edit.findText(autodetected, Qt.MatchFixedString)
+                if idx == -1:
+                    self.port_edit.addItem(autodetected)
+                    idx = self.port_edit.findText(autodetected, Qt.MatchFixedString)
+                if idx != -1:
+                    self.port_edit.setCurrentIndex(idx)
 
     def _adjust_min_window_size(self):
         try:
@@ -2294,8 +3159,8 @@ class App(QWidget):
             return
         try:
             total = max(1, self.width())
-            left = int(round(total * 0.75))
-            right = max(360, total - left)
+            right = int(round(total * 0.75))
+            left = max(360, total - right)
             split.set_pane_sizes([left, right])
         except Exception:
             pass

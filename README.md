@@ -24,12 +24,12 @@ The sync LED on pin 8 lights during a tap for video alignment.
 UI & Workflow
 -------------
 - **Global font:** Typestar OCR (bundled in `assets/fonts/Typestar OCR Regular.otf`).
-- **Theme:** instrument-panel palette (bg `#0d0f12`, panels `#161a1f`, text `#b8c0cc`, subtle `#8a93a3`, accent `#5aa3ff`, danger `#e33`).
+- **Theme:** launches in **Light Mode** with controls on the **left** (25 % width) and data on the right (75 %). Dark Mode is still available from the menu. Typestar OCR remains the global typeface.
 - **Logo:** `assets/images/transparent_logo.png` used as window icon and header badge.
 - **Preview panel:** 16:9 container with a subtle border while idle; as soon as the first real frame arrives the border hides and the preview goes edge‑to‑edge. The container adapts to the camera’s native aspect (4:3/16:9/16:10) to avoid letterboxing artifacts.
 - **Live chart:** template‑style stimulus raster (top) embedded under the preview, themed to match the UI (Typestar, dark). X‑axis shows 0–70 minutes with 10‑min majors and 1‑min minors. Updates live with each tap.
 - **Combobox popups:** dark, padded popup views (no native blue) with fixed control widths to prevent layout nudges.
-- **Photo‑booth flow:** open camera → adjust focus/POV → Start Recording → Start Run. Recording is independent from the run.
+- **Photo‑booth flow:** connect serial (pick from the dropdown), open camera → adjust focus/POV → optionally **Flash Hardware Config** if you just want to exercise the hardware → press **Start Run** when you’re ready to log. Recording is independent from the run.
 - **Sanity check:** if you start a run without recording, you'll be prompted to confirm.
 - **Pro Mode:** keyboard-first interaction (toggle in UI). When ON, some chrome hides for density and single-key controls are active:
   space=manual tap | r=rec on/off | s=run start/stop | e/d=enable/disable |
@@ -59,7 +59,7 @@ Install & Run
 2) Activate the venv
 3) pip install -r requirements.txt
 4) python run.py
-Then: open camera, connect serial, choose output dir, start/stop recording, start/stop run.
+Then: connect serial (choose from the combo box or type manually), open camera, choose output dir, optionally flash the hardware config to test the rig, start/stop recording, start/stop run.
 
 Legacy Serial Wrapper
 ---------------------
