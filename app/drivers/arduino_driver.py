@@ -56,9 +56,14 @@ class SerialLink(ControllerDriver):
                 self.ser = None
 
     def send_char(self, ch: str):
+        self.send_text(ch[:1])
+
+    def send_text(self, text: str):
         if not self.is_open():
             return
-        data = ch.encode('ascii', errors='ignore')[:1]
+        data = text.encode('ascii', errors='ignore')
+        if not data:
+            return
         try:
             self.ser.write(data)
         except Exception:

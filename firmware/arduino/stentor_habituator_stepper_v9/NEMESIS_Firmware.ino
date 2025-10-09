@@ -29,6 +29,8 @@ http://www.schmalzhaus.com/EasyDriver/Examples/EasyDriverExamples.html
 // changes minimal; new hardware enhancements should target the UNIT1 project.
 
 #include <Arduino.h>
+#include <ctype.h>
+#include <stdlib.h>
 
 // Typed Constants for Pins & Configuration
 const uint8_t PIN_STEP = 2;
@@ -79,6 +81,7 @@ void checkSerialInput();
 void checkTimedPulse();
 void startTimedMode();
 void stopTimedMode();
+void processHostConfig();
 void configurePeriodicMode();
 void configureRandomMode();
 void enableMotor();
@@ -129,6 +132,11 @@ void checkHardwareInputs() {
     bool currentSwitchState = digitalRead(PIN_MODE_SWITCH);
     if (currentSwitchState != lastSwitchState) {
       lastSwitchDebounceTime = currentTime;
+      if (currentSwitchState == HIGH) {
+        Serial.println(F("EVENT:SWITCH,ON"));
+      } else {
+        Serial.println(F("EVENT:SWITCH,OFF"));
+      }
       if (currentSwitchState == HIGH && currentMode == Mode::Idle) {
         startTimedMode();
       } else if (currentSwitchState == LOW && currentMode != Mode::Idle) {
@@ -160,11 +168,114 @@ void checkSerialInput() {
       case 'p': configureRandomMode();   break;
       case 'e': enableMotor();           break;
       case 'd': disableMotor();          break;
+      case 'C':
+      case 'c':
+        processHostConfig();
+        break;
+      case 't':
+      case 'T':
+        Serial.println(F("Host tap command received."));
+        deliverTap();
+        break;
       case 'r': raiseArm();              break;
       case 'l': lowerArm();              break;
       case 'h': printHelp();             break;
+      case '1': case '2': case '3': case '4': case '5':
+        stepsize = userInput - '0';
+        Serial.print(F("CONFIG:STEPSIZE="));
+        Serial.println(stepsize);
+        break;
     }
   }
+}
+
+void processHostConfig() {
+  char buffer[48];
+  size_t len = Serial.readBytesUntil('\n', buffer, sizeof(buffer) - 1);
+  buffer[len] = '\0';
+
+  // Trim leading whitespace/separators
+  char *cursor = buffer;
+  while (*cursor == ' ' || *cursor == ',' || *cursor == ':' || *cursor == '\r') {
+    cursor++;
+  }
+  if (*cursor == '\0') {
+    Serial.println(F("CONFIG:ERR,EMPTY"));
+    return;
+  }
+
+  char modeChar = toupper(*cursor++);
+  while (*cursor == ' ' || *cursor == ',' ) { cursor++; }
+  if (modeChar == 'C') {
+    if (*cursor == '\0') {
+      Serial.println(F("CONFIG:ERR,MODE"));
+      return;
+    }
+    modeChar = toupper(*cursor++);
+    while (*cursor == ' ' || *cursor == ',' ) { cursor++; }
+  }
+
+  char *stepToken = cursor;
+  while (*cursor && *cursor != ' ' && *cursor != ',' ) { cursor++; }
+  if (*cursor) { *cursor++ = '\0'; }
+  while (*cursor == ' ' || *cursor == ',' ) { cursor++; }
+
+  char *valueToken = cursor;
+  while (*cursor && *cursor != ' ' && *cursor != ',' ) { cursor++; }
+  *cursor = '\0';
+
+  int parsedStep = atoi(stepToken);
+  if (parsedStep < 1) parsedStep = 1;
+  if (parsedStep > 5) parsedStep = 5;
+
+  double parsedValue = atof(valueToken);
+  bool ok = true;
+
+  if (currentMode != Mode::Idle) {
+    stopTimedMode();
+  }
+
+  if (modeChar == 'P') {
+    configuredModeIsRandom = false;
+    stepsize = parsedStep;
+    if (parsedValue <= 0.0) {
+      ok = false;
+    }
+    if (ok) {
+      unsigned long delayMs = (unsigned long)(parsedValue * 1000.0);
+      if (delayMs < 1UL) {
+        delayMs = 1UL;
+      }
+      periodicDelayMs = delayMs;
+      Serial.print(F("CONFIG:OK,MODE=P,PERIOD_MS="));
+      Serial.println(periodicDelayMs);
+    }
+  } else if (modeChar == 'R') {
+    configuredModeIsRandom = true;
+    stepsize = parsedStep;
+    if (parsedValue <= 0.0) {
+      ok = false;
+    }
+    if (ok) {
+      lambda = parsedValue / 60000.0f;
+      Serial.print(F("CONFIG:OK,MODE=R,RATE_PER_MIN="));
+      Serial.println(parsedValue, 4);
+    }
+  } else {
+    ok = false;
+  }
+
+  if (!ok) {
+    Serial.println(F("CONFIG:ERR,PARAM"));
+    return;
+  }
+
+  // Ensure any running timed mode is stopped before applying new settings
+  session.tapCount = 0;
+  session.nextTapTime = 0;
+  Serial.print(F("CONFIG:STEPSIZE="));
+  Serial.println(stepsize);
+  Serial.println(F("CONFIG:DONE"));
 }
 
 void checkTimedPulse() {
@@ -209,6 +320,7 @@ void startTimedMode() {
   currentMode = configuredModeIsRandom ? Mode::Random : Mode::Periodic;
   Serial.println(F("--- TIMED MODE ACTIVATED ---"));
   Serial.println(F("Tapping..."));
+  Serial.println(F("EVENT:MODE_ACTIVATED"));
 
   // Deliver the first tap immediately and start the session
   deliverTap();
@@ -236,6 +348,7 @@ void stopTimedMode() {
   digitalWrite(PIN_GREEN_LED, LOW);
   digitalWrite(PIN_RED_LED, LOW);
   Serial.println(F("--- TIMED MODE DEACTIVATED ---"));
+  Serial.println(F("EVENT:MODE_DEACTIVATED"));
 
   if (session.tapCount > 0) {
     unsigned long elapsedTime = millis() - session.startTime;
@@ -328,6 +441,8 @@ void raiseArm() {
   digitalWrite(PIN_ENABLE, LOW);
   for (int i = 0; i < MANUAL_JOG_STEPS; i++) { digitalWrite(PIN_STEP, HIGH); delay(1); digitalWrite(PIN_STEP, LOW); delay(1); }
   resetBEDPins();
+  Serial.print(F("EVENT:TAP,"));
+  Serial.println(millis());
 }
 
 void lowerArm() {
@@ -354,6 +469,8 @@ void deliverTap() {
   }
 
   resetBEDPins();
+  Serial.print(F("EVENT:TAP,"));
+  Serial.println(millis());
 }
 
 void executeTapProfile(int steps, int ms1, int ms2, int ms3) {
@@ -418,4 +535,3 @@ void printHelp() {
     Serial.println(msg);
   }
 }
-
