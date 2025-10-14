@@ -95,10 +95,10 @@ python run.py
 6. *(Optional troubleshooting)* **Flash Hardware Config**. Sends the current settings to the board so you can flip the physical switch and observe motion without logging taps. Status will read “Config flashed for testing…” until you start a run.
 7. **Start Run** when you want to record data.  
    - The app resends the configuration, enables logging, and creates `runs/run_YYYYMMDD_HHMMSS_<token>/` with:
-     - `run.json` – parameters & environment snapshot
-     - `taps.csv` – one row per tap (see schema below)
-     - `video.mp4` – if recording was ON at any time
-8. **Stop Run** (or flip the physical switch off) when finished. Use `app/core/plotter.py` to generate rasters/plots.
+      - `run.json` – parameters & environment snapshot
+      - `taps.csv` – one row per tap (see schema below)
+      - `video.mp4` – if recording was ON at any time
+8. **Stop Run** (or flip the physical switch off) when finished. Use `app/core/plotter.py` to generate rasters/plots. The app records the observed timing drift and saves a per-port calibration to `~/.nemesis/calibration.json`; future periodic runs automatically apply that factor so multi-hour sessions stay aligned with wall-clock seconds. **If the drift still exceeds 1 s/hour, treat as P0—see Reliable Timing section below.**
 
 > Still prefer the pre-NEMESIS serial console? Run `python tools/arduino_wrapper.py --port <your_port>`
 > to get the legacy single-character workflow inside the repo. The wrapper sends digits + newline
@@ -151,7 +151,7 @@ Snapshot of parameters captured at **Start Run**:
 - ✅ Save/Load config (`~/.nemesis/config.json`)
 - ✅ Run snapshot (`run.json`) in each run directory
 - ✅ Version stamp `1.0‑rc1`
-- ✅ Live raster chart embedded under the preview (0–70 min)
+- ✅ Live raster chart embedded under the preview (timeline grows with the run and switches to hours after 2 h)
 - ✅ Dark combobox popups, fixed control widths, left/right splitter to eliminate layout tug
 - ✅ App‑wide pinch zoom + two‑finger browsing; auto‑hiding slim scrollbars
 
@@ -185,6 +185,8 @@ Snapshot of parameters captured at **Start Run**:
    - On connect: firmware string/version + echo test; show in status line.
 9. **Template export**
    - Export current config as `nemesis_config_<date>.json` for sharing.
+
+> 🚨 **Urgent**: long-run drift exceeds 1 s/hour on some boards even after calibration. Once timing calibration hits the top of the backlog again, verify firmware scheduling + host factor and update this list.
 
 ---
 

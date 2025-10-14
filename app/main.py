@@ -17,7 +17,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QImage, QPixmap, QFontDatabase, QFont, QIcon, QPainter, QColor, QPen, QDesktopServices
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 import matplotlib.pyplot as plt
-from matplotlib.ticker import MultipleLocator
+from matplotlib.ticker import MultipleLocator, AutoLocator
 import matplotlib as mpl
 from matplotlib import font_manager
 from serial.tools import list_ports
@@ -296,50 +296,19 @@ class LiveChart:
         except Exception:
             pass
         self.times_sec: list[float] = []
+        self._time_unit: str = "minutes"
+        self._time_factor: float = 60.0
         self._init_axes()
 
     def _init_axes(self):
         text_color = self.color("TEXT")
         self.fig.suptitle("Stentor Habituation to Stimuli", fontsize=10, color=text_color, y=0.96)
-        # Make figure/axes transparent so the framed panel shows through
         try:
             self.fig.patch.set_alpha(0.0)
             self.fig.patch.set_facecolor('none')
         except Exception:
             pass
-        ax = self.ax_top
-        ax.clear()
-        try:
-            ax.set_facecolor('none')
-        except Exception:
-            pass
-        ax.set_ylabel("Taps", color=text_color)
-        ax.set_yticks([])
-        ax.set_xlim(0, 70)
-        ax.xaxis.set_major_locator(MultipleLocator(10))
-        ax.xaxis.set_minor_locator(MultipleLocator(1))
-        ax.grid(True, which="major", axis="x", linestyle=":", alpha=0.9)
-        ax.grid(True, which="minor", axis="x", linestyle=":", alpha=0.35)
-        for spine in ax.spines.values():
-            spine.set_color(text_color)
-
-        ax2 = self.ax_bot
-        ax2.clear()
-        try:
-            ax2.set_facecolor('none')
-        except Exception:
-            pass
-        ax2.set_xlabel("Time (minutes)")
-        ax2.set_ylabel("% Contracted")
-        ax2.set_ylim(-5, 105)
-        ax2.set_xlim(0, 70)
-        ax2.xaxis.set_major_locator(MultipleLocator(10))
-        ax2.xaxis.set_minor_locator(MultipleLocator(1))
-        ax2.grid(True, which="major", axis="x", linestyle=":", alpha=0.9)
-        ax2.grid(True, which="minor", axis="x", linestyle=":", alpha=0.35)
-        ax2.yaxis.set_major_formatter(plt.FuncFormatter("{:.0f}%".format))
-        for spine in ax2.spines.values():
-            spine.set_color(text_color)
+        self._configure_axes("minutes", 0.0)
         self.canvas.draw_idle()
 
     def reset(self):
@@ -351,33 +320,89 @@ class LiveChart:
         self._redraw()
 
     def _redraw(self):
-        ts_min = [t / 60.0 for t in self.times_sec]
-        highlighted = [t for i, t in enumerate(ts_min) if (i + 1) % 10 == 0]
-        regular     = [t for i, t in enumerate(ts_min) if (i + 1) % 10 != 0]
+        if not self.times_sec:
+            self._configure_axes("minutes", 0.0)
+            self.canvas.draw_idle()
+            return
 
-        ax = self.ax_top
-        ax.cla()
+        max_elapsed_sec = max(self.times_sec)
+        unit = "hours" if max_elapsed_sec >= 2 * 3600 else "minutes"
+        self._configure_axes(unit, max_elapsed_sec)
+
+        factor = 3600.0 if unit == "hours" else 60.0
+        ts_unit = [t / factor for t in self.times_sec]
+        highlighted = [t for i, t in enumerate(ts_unit) if (i + 1) % 10 == 0]
+        regular     = [t for i, t in enumerate(ts_unit) if (i + 1) % 10 != 0]
+
+        text_color = self.color("TEXT")
+        base_width = 0.9 if unit == "minutes" else 0.09
+        highlight_width = 1.6 if unit == "minutes" else 0.16
+        if regular:
+            self.ax_top.eventplot(regular, orientation="horizontal", colors=text_color, linewidth=base_width)
+        if highlighted:
+            self.ax_top.eventplot(highlighted, orientation="horizontal", colors=self.color("ACCENT"), linewidth=highlight_width)
+
+        self.canvas.draw_idle()
+
+    def _configure_axes(self, unit: str, max_elapsed_sec: float):
+        text_color = self.color("TEXT")
+        ax_top = self.ax_top
+        ax_bot = self.ax_bot
+
+        ax_top.cla()
+        ax_bot.cla()
         try:
-            ax.set_facecolor('none')
+            ax_top.set_facecolor('none')
+            ax_bot.set_facecolor('none')
         except Exception:
             pass
-        text_color = self.color("TEXT")
-        ax.set_ylabel("Taps", color=text_color)
-        ax.set_yticks([])
-        ax.set_xlim(0, 70)
-        ax.xaxis.set_major_locator(MultipleLocator(10))
-        ax.xaxis.set_minor_locator(MultipleLocator(1))
-        ax.grid(True, which="major", axis="x", linestyle=":", alpha=0.9)
-        ax.grid(True, which="minor", axis="x", linestyle=":", alpha=0.35)
-        for spine in ax.spines.values():
+
+        ax_top.set_ylabel("Taps", color=text_color)
+        ax_top.set_yticks([])
+        ax_top.tick_params(axis='x', colors=text_color)
+        ax_top.tick_params(axis='y', colors=text_color)
+        for spine in ax_top.spines.values():
             spine.set_color(text_color)
 
-        if regular:
-            ax.eventplot(regular, orientation="horizontal", colors=text_color, linewidth=0.9)
-        if highlighted:
-            ax.eventplot(highlighted, orientation="horizontal", colors=self.color("ACCENT"), linewidth=1.6)
-        self.ax_bot.set_ylim(-5, 105)
-        self.canvas.draw_idle()
+        ax_bot.set_ylabel("% Contracted")
+        ax_bot.set_ylim(-5, 105)
+        ax_bot.yaxis.set_major_formatter(plt.FuncFormatter("{:.0f}%".format))
+        ax_bot.tick_params(axis='x', colors=text_color)
+        ax_bot.tick_params(axis='y', colors=text_color)
+        for spine in ax_bot.spines.values():
+            spine.set_color(text_color)
+
+        factor = 3600.0 if unit == "hours" else 60.0
+        default_limit = 2.0 if unit == "hours" else 70.0
+        max_unit_val = max(default_limit, (max_elapsed_sec / factor) * 1.1 if max_elapsed_sec else default_limit)
+
+        if unit == "minutes":
+            major = MultipleLocator(10)
+            minor = MultipleLocator(1)
+            ax_top.xaxis.set_major_locator(major)
+            ax_top.xaxis.set_minor_locator(minor)
+            ax_bot.xaxis.set_major_locator(MultipleLocator(10))
+            ax_bot.xaxis.set_minor_locator(MultipleLocator(1))
+            ax_bot.set_xlabel("Time (minutes)")
+            ax_top.grid(True, which="major", axis="x", linestyle=":", alpha=0.9)
+            ax_top.grid(True, which="minor", axis="x", linestyle=":", alpha=0.35)
+            ax_bot.grid(True, which="major", axis="x", linestyle=":", alpha=0.9)
+            ax_bot.grid(True, which="minor", axis="x", linestyle=":", alpha=0.35)
+        else:
+            locator_top = AutoLocator()
+            locator_bot = AutoLocator()
+            ax_top.xaxis.set_major_locator(locator_top)
+            ax_top.xaxis.set_minor_locator(None)
+            ax_bot.xaxis.set_major_locator(locator_bot)
+            ax_bot.xaxis.set_minor_locator(None)
+            ax_bot.set_xlabel("Time (hours)")
+            ax_top.grid(True, which="major", axis="x", linestyle=":", alpha=0.9)
+            ax_bot.grid(True, which="major", axis="x", linestyle=":", alpha=0.9)
+
+        ax_top.set_xlim(0, max_unit_val)
+        ax_bot.set_xlim(0, max_unit_val)
+        self._time_unit = unit
+        self._time_factor = factor
 
     def color(self, key: str) -> str:
         if key in self.theme:
@@ -2226,6 +2251,12 @@ class App(QWidget):
         self._pending_run_metadata: dict[str, object] | None = None
         self._last_hw_tap_ms: float | None = None
         self._flash_only_mode = False
+        self._first_hw_tap_ms: float | None = None
+        self._first_host_tap_monotonic: float | None = None
+        self._last_host_tap_monotonic: float | None = None
+        self._active_serial_port: str = ""
+        self._calibration_path = Path.home() / ".nemesis" / "calibration.json"
+        self._period_calibration: dict[str, float] = self._load_calibration()
 
         # Dense status line updater
         self.status_timer = QTimer(self); self.status_timer.timeout.connect(self._refresh_statusline); self.status_timer.start(400)
@@ -2541,9 +2572,12 @@ class App(QWidget):
         stepsize = max(1, min(int(self.current_stepsize), 5))
         period_s = float(self.period_sec.value())
         lambda_rpm = float(self.lambda_rpm.value())
+        port = self.port_edit.currentText().strip()
         if mode_token == 'P':
             period_s = max(0.001, period_s)
-            config_value = f"{period_s:.6f}"
+            calibration = self._period_calibration.get(port, 1.0) if port else 1.0
+            adjusted_period = period_s * calibration
+            config_value = f"{adjusted_period:.6f}"
         else:
             lambda_rpm = max(0.01, lambda_rpm)
             config_value = f"{lambda_rpm:.6f}"
@@ -2559,6 +2593,8 @@ class App(QWidget):
             "outdir": self.outdir_edit.text().strip() or os.getcwd(),
             "rec_path": getattr(self.recorder, "path", ""),
             "timestamp": time.strftime("%Y%m%d_%H%M%S"),
+            "port": port,
+            "period_calibration": self._period_calibration.get(port, 1.0) if port else 1.0,
         }
         return message, meta
 
@@ -2567,7 +2603,10 @@ class App(QWidget):
             self._initialize_run_logger()
         self._hardware_run_active = True
         self._awaiting_switch_start = False
+        self._first_hw_tap_ms = None
         self._last_hw_tap_ms = None
+        self._first_host_tap_monotonic = None
+        self._last_host_tap_monotonic = None
         self.taps = 0
         self.run_start = time.monotonic()
         self.counters.setText("Taps: 0 | Elapsed: 0.0 s | Observed rate: 0.0 /min")
@@ -2593,6 +2632,9 @@ class App(QWidget):
         if not self._hardware_run_active:
             return
         host_now = time.monotonic()
+        if self._first_host_tap_monotonic is None:
+            self._first_host_tap_monotonic = host_now
+        self._last_host_tap_monotonic = host_now
         if self.run_start is None:
             self.run_start = host_now
         elapsed = host_now - self.run_start
@@ -2604,7 +2646,11 @@ class App(QWidget):
         except Exception:
             pass
         try:
-            self._last_hw_tap_ms = float(data) if data else None
+            if data:
+                value = float(data)
+                if self._first_hw_tap_ms is None:
+                    self._first_hw_tap_ms = value
+                self._last_hw_tap_ms = value
         except Exception:
             self._last_hw_tap_ms = None
         if self.logger:
@@ -2649,7 +2695,7 @@ class App(QWidget):
             "firmware_commit": "",
             "camera_index": self.cam_index.value(),
             "recording_path": rec_path,
-            "serial_port": self.port_edit.text().strip(),
+            "serial_port": self.port_edit.currentText().strip(),
             "mode": meta.get("mode_label", self.mode.currentText()),
             "period_sec": meta.get("period_sec", float(self.period_sec.value())),
             "lambda_rpm": meta.get("lambda_rpm", float(self.lambda_rpm.value())),
@@ -2739,7 +2785,14 @@ class App(QWidget):
             if not port:
                 port = self._auto_detect_serial_port()
                 if port:
-                    self.port_edit.setCurrentText(port)
+                    idx = self.port_edit.findText(port, Qt.MatchFixedString)
+                    if idx == -1:
+                        self.port_edit.addItem(port)
+                        idx = self.port_edit.findText(port, Qt.MatchFixedString)
+                    if idx != -1:
+                        self.port_edit.setCurrentIndex(idx)
+                    else:
+                        self.port_edit.setCurrentText(port)
             if not port:
                 self._update_status("Enter a serial port first.")
                 return
@@ -2913,6 +2966,7 @@ class App(QWidget):
 
         meta["source"] = "start_run"
         self._pending_run_metadata = meta
+        self._active_serial_port = meta.get("port", self.port_edit.currentText().strip())
         self._initialize_run_logger(force=True)
         self._update_status("Configuration sent. Flip the switch ON to begin the run.")
         self._send_serial_char('e', "Enable motor")
@@ -2922,6 +2976,7 @@ class App(QWidget):
             self.run_timer.stop()
         except Exception:
             pass
+        self._finalize_period_calibration()
         if self.logger:
             self.logger.close()
             self.logger = None
@@ -2943,6 +2998,10 @@ class App(QWidget):
         self.counters.setText("Taps: 0 | Elapsed: 0.0 s | Observed rate: 0.0 /min")
         message = reason or ("Hardware run stopped." if from_hardware else "Run stopped.")
         self._update_status(message)
+        self._active_serial_port = ""
+        self._first_hw_tap_ms = None
+        self._first_host_tap_monotonic = None
+        self._last_host_tap_monotonic = None
 
     def _flash_hardware_config(self):
         if not self.serial.is_open():
@@ -2967,6 +3026,7 @@ class App(QWidget):
             self.live_chart.reset()
         except Exception:
             pass
+        self._active_serial_port = meta.get("port", self.port_edit.currentText().strip())
         self._update_status("Config flashed for testing. Flip the switch to move; press Start Run to log data.")
         self._send_serial_char('e', "Enable motor")
 
@@ -3128,6 +3188,57 @@ class App(QWidget):
                     idx = self.port_edit.findText(autodetected, Qt.MatchFixedString)
                 if idx != -1:
                     self.port_edit.setCurrentIndex(idx)
+
+    def _load_calibration(self) -> dict[str, float]:
+        try:
+            with open(self._calibration_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                calibrated = {}
+                for key, value in data.items():
+                    try:
+                        calibrated[str(key)] = float(value)
+                    except Exception:
+                        continue
+                return calibrated
+        except Exception:
+            pass
+        return {}
+
+    def _save_calibration(self) -> None:
+        try:
+            self._calibration_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._calibration_path, "w", encoding="utf-8") as f:
+                json.dump(self._period_calibration, f, indent=2)
+        except Exception:
+            pass
+
+    def _finalize_period_calibration(self):
+        if self.logger is None:
+            return
+        port = self._active_serial_port.strip()
+        if not port:
+            return
+        if self.mode.currentText() != "Periodic":
+            return
+        if self._first_hw_tap_ms is None or self._last_hw_tap_ms is None:
+            return
+        if self._first_host_tap_monotonic is None or self._last_host_tap_monotonic is None:
+            return
+        board_elapsed_ms = self._last_hw_tap_ms - self._first_hw_tap_ms
+        host_elapsed = self._last_host_tap_monotonic - self._first_host_tap_monotonic
+        if board_elapsed_ms <= 0 or host_elapsed <= 0:
+            return
+        if host_elapsed < 30.0:  # require at least 30s of data
+            return
+        factor = host_elapsed / (board_elapsed_ms / 1000.0)
+        if abs(factor - 1.0) < 1e-4:
+            return
+        # Clamp to reasonable range
+        factor = max(0.95, min(1.05, factor))
+        self._period_calibration[port] = factor
+        self._save_calibration()
+        self._update_status(f"Calibration updated for {port}: x{factor:.6f}")
 
     def _adjust_min_window_size(self):
         try:

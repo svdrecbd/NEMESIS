@@ -27,9 +27,10 @@ UI & Workflow
 - **Theme:** launches in **Light Mode** with controls on the **left** (25 % width) and data on the right (75 %). Dark Mode is still available from the menu. Typestar OCR remains the global typeface.
 - **Logo:** `assets/images/transparent_logo.png` used as window icon and header badge.
 - **Preview panel:** 16:9 container with a subtle border while idle; as soon as the first real frame arrives the border hides and the preview goes edge‑to‑edge. The container adapts to the camera’s native aspect (4:3/16:9/16:10) to avoid letterboxing artifacts.
-- **Live chart:** template‑style stimulus raster (top) embedded under the preview, themed to match the UI (Typestar, dark). X‑axis shows 0–70 minutes with 10‑min majors and 1‑min minors. Updates live with each tap.
+- **Live chart:** template‑style stimulus raster (top) embedded under the preview. The timeline expands automatically; after two hours it switches to hours and thins the tick markers so long runs stay readable.
 - **Combobox popups:** dark, padded popup views (no native blue) with fixed control widths to prevent layout nudges.
 - **Photo‑booth flow:** connect serial (pick from the dropdown), open camera → adjust focus/POV → optionally **Flash Hardware Config** if you just want to exercise the hardware → press **Start Run** when you’re ready to log. Recording is independent from the run.
+- **Timing calibration:** after each periodic run the app compares host vs. controller timing and stores a per-port calibration in `~/.nemesis/calibration.json`; future runs automatically apply the correction so 24 h “ultra” sessions stay aligned with wall-clock time.
 - **Sanity check:** if you start a run without recording, you'll be prompted to confirm.
 - **Pro Mode:** keyboard-first interaction (toggle in UI). When ON, some chrome hides for density and single-key controls are active:
   space=manual tap | r=rec on/off | s=run start/stop | e/d=enable/disable |
@@ -47,6 +48,7 @@ Data & Files
 - `taps.csv`: run_id, tap_id, tap_uuid, t_host_ms, mode, stepsize, mark, notes, recording_path
 - `app/core/plotter.py`: data-free `make_figure(...)` and `save_figure(...)` for raster+scatter plots
 - Planned exports: per-run JSON (config), analysis CSV, plots, and video bundle
+- `~/.nemesis/calibration.json`: per-port timing calibration written after each periodic run (used to compensate microsecond drift on future runs)
 
 Recording
 ---------

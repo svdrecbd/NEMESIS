@@ -72,7 +72,10 @@ Session session;
 
 // Mode-specific Parameters
 int stepsize = 4; // Default to 1/8th microstep
-long periodicDelayMs = 10000;
+double periodicDelayMsFloat = 10000.0;
+unsigned long periodicDelayMsBase = 10000;
+double periodicDelayMsFraction = 0.0;
+double periodicDelayMsAccumulator = 0.0;
 float lambda = 0.0; // Taps per millisecond for random mode
 
 // Forward Declarations
@@ -242,13 +245,15 @@ void processHostConfig() {
       ok = false;
     }
     if (ok) {
-      unsigned long delayMs = (unsigned long)(parsedValue * 1000.0);
-      if (delayMs < 1UL) {
-        delayMs = 1UL;
+      periodicDelayMsFloat = parsedValue * 1000.0;
+      if (periodicDelayMsFloat < 1.0) {
+        periodicDelayMsFloat = 1.0;
       }
-      periodicDelayMs = delayMs;
+      periodicDelayMsBase = (unsigned long)periodicDelayMsFloat;
+      periodicDelayMsFraction = periodicDelayMsFloat - periodicDelayMsBase;
+      periodicDelayMsAccumulator = 0.0;
       Serial.print(F("CONFIG:OK,MODE=P,PERIOD_MS="));
-      Serial.println(periodicDelayMs);
+      Serial.println(periodicDelayMsFloat, 4);
     }
   } else if (modeChar == 'R') {
     configuredModeIsRandom = true;
@@ -280,11 +285,10 @@ void processHostConfig() {
 
 void checkTimedPulse() {
   if (currentMode != Mode::Idle && millis() >= session.nextTapTime) {
-
-    unsigned long thisTapStartTime = session.nextTapTime;
+    unsigned long tapStart = millis();
 
     if (session.tapCount == 0) {
-      session.startTime = thisTapStartTime;
+      session.startTime = tapStart;
       if (currentMode == Mode::Random) { // Only print for random mode
         Serial.println(F("Run started. First tap delivered at T+ 0m 0s 0ms"));
       }
@@ -295,20 +299,32 @@ void checkTimedPulse() {
 
     if (currentMode == Mode::Random && session.tapCount > 1) {
       Serial.print(F("Random tap delivered at T+ "));
-      printFormattedTime(thisTapStartTime - session.startTime);
+      printFormattedTime(tapStart - session.startTime);
       Serial.println();
     }
 
-    // Schedule the next tap seamlessly
     if (currentMode == Mode::Random) {
       float U = random(1, 10001) / 10000.0f;
       unsigned long T = (unsigned long)(-log(U) / lambda);
-      session.nextTapTime = thisTapStartTime + T;
+      if (T == 0UL) {
+        T = 1UL;
+      }
+      session.nextTapTime = tapStart + T;
       Serial.print(F("Next random tap scheduled in "));
       Serial.print(T / 1000.0f, 3);
       Serial.println(F(" seconds.\n"));
     } else { // Periodic Mode
-      session.nextTapTime = thisTapStartTime + periodicDelayMs;
+      unsigned long delayMs = periodicDelayMsBase;
+      periodicDelayMsAccumulator += periodicDelayMsFraction;
+      if (periodicDelayMsAccumulator >= 1.0) {
+        unsigned long extra = (unsigned long)periodicDelayMsAccumulator;
+        delayMs += extra;
+        periodicDelayMsAccumulator -= extra;
+      }
+      if (delayMs < 1UL) {
+        delayMs = 1UL;
+      }
+      session.nextTapTime = tapStart + delayMs;
     }
   }
 }
@@ -322,24 +338,28 @@ void startTimedMode() {
   Serial.println(F("Tapping..."));
   Serial.println(F("EVENT:MODE_ACTIVATED"));
 
-  // Deliver the first tap immediately and start the session
+  unsigned long tapStart = millis();
   deliverTap();
-  session.startTime = millis();
+  session.startTime = tapStart;
   session.tapCount = 1;
 
-  // Schedule the *second* tap
   if (currentMode == Mode::Random) {
-    if (session.tapCount == 1) { // Only print for random mode
-        Serial.println(F("Run started. First tap delivered at T+ 0m 0s 0ms"));
-    }
     float U = random(1, 10001) / 10000.0f;
     unsigned long T = (unsigned long)(-log(U) / lambda);
-    session.nextTapTime = millis() + T;
+    if (T == 0UL) {
+      T = 1UL;
+    }
+    session.nextTapTime = tapStart + T;
     Serial.print(F("Next random tap scheduled in "));
     Serial.print(T / 1000.0f, 3);
     Serial.println(F(" seconds.\n"));
   } else {
-    session.nextTapTime = millis() + periodicDelayMs;
+    periodicDelayMsAccumulator = 0.0;
+    unsigned long delayMs = periodicDelayMsBase;
+    if (delayMs < 1UL) {
+        delayMs = 1UL;
+    }
+    session.nextTapTime = tapStart + delayMs;
   }
 }
 
@@ -388,9 +408,15 @@ void configurePeriodicMode() {
   Serial.println(F("Enter the stimulus period in MINUTES:"));
   while (Serial.available() == 0) {}
   float time_minutes = Serial.parseFloat();
-  periodicDelayMs = time_minutes * 60 * 1000;
+  periodicDelayMsFloat = time_minutes * 60.0f * 1000.0f;
+  if (periodicDelayMsFloat < 1.0f) {
+    periodicDelayMsFloat = 1.0f;
+  }
+  periodicDelayMsBase = (unsigned long)periodicDelayMsFloat;
+  periodicDelayMsFraction = periodicDelayMsFloat - periodicDelayMsBase;
+  periodicDelayMsAccumulator = 0.0;
   Serial.print(F("Time period set to ")); Serial.print(time_minutes); Serial.println(F(" minutes."));
-  Serial.print(F("Which corresponds to a delay of ")); Serial.print(periodicDelayMs); Serial.println(F(" ms."));
+  Serial.print(F("Which corresponds to a delay of ")); Serial.print(periodicDelayMsFloat, 4); Serial.println(F(" ms."));
   Serial.println(F("Configuration complete. Use the switch to start/stop.\n"));
 }
 
