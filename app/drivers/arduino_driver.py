@@ -33,7 +33,8 @@ class SerialLink(ControllerDriver):
                 if b in (b'\n', b'\r'):
                     if buf:
                         try:
-                            self._rx_queue.put(bytes(buf).decode(errors='replace'))
+                            line = bytes(buf).decode(errors='replace')
+                            self._rx_queue.put((time.monotonic(), line))
                         finally:
                             buf.clear()
                 else:
@@ -69,11 +70,18 @@ class SerialLink(ControllerDriver):
         except Exception:
             pass
 
-    def read_line_nowait(self):
+    def read_line_nowait(self, with_timestamp: bool = False):
         try:
-            return self._rx_queue.get_nowait()
+            item = self._rx_queue.get_nowait()
         except queue.Empty:
             return None
+        if with_timestamp:
+            if isinstance(item, tuple):
+                return item
+            return (time.monotonic(), item)
+        if isinstance(item, tuple):
+            return item[1]
+        return item
 
     def wait_for(self, substr: str, timeout_s: float = 1.0) -> bool:
         deadline = time.monotonic() + max(0.0, timeout_s)

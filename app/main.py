@@ -1,6 +1,7 @@
 # app.py — NEMESIS UI (v1.0-rc1, unified feature set)
 import sys, os, time, json, uuid
 from pathlib import Path
+from collections import deque
 from collections.abc import Sequence
 
 from PySide6.QtWidgets import (
@@ -1917,7 +1918,7 @@ class App(QWidget):
         except Exception:
             pass
         self.status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        self.counters = QLabel("Taps: 0 | Elapsed: 0.0 s | Observed rate: 0.0 /min")
+        self.counters = QLabel("Taps: 0 | Elapsed: 0 s | Rate10: -- /min | Overall: 0.0 /min")
         serial_status_row = QHBoxLayout()
         serial_status_row.setContentsMargins(0, 0, 0, 0)
         serial_status_row.setSpacing(12)
@@ -2243,6 +2244,9 @@ class App(QWidget):
         self.run_dir   = None
         self.run_start = None
         self.taps = 0; self.preview_fps = 30; self.current_stepsize = 4
+        self._recent_intervals: deque[float] = deque(maxlen=10)
+        self._last_tap_timestamp: float | None = None
+        self._reset_tap_history()
         self._pip_window: PinnedPreviewWindow | None = None
         self._hardware_run_active = False
         self._awaiting_switch_start = False
@@ -2255,8 +2259,14 @@ class App(QWidget):
         self._first_host_tap_monotonic: float | None = None
         self._last_host_tap_monotonic: float | None = None
         self._active_serial_port: str = ""
-        self._calibration_path = Path.home() / ".nemesis" / "calibration.json"
+        self._calibration_paths: tuple[Path, ...] = (
+            Path.home() / ".nemesis" / "calibration.json",
+            BASE_DIR / "runs" / "calibration.json",
+        )
+        self._active_calibration_path: Path | None = None
         self._period_calibration: dict[str, float] = self._load_calibration()
+        if self._active_calibration_path is None:
+            self._active_calibration_path = self._calibration_paths[0]
 
         # Dense status line updater
         self.status_timer = QTimer(self); self.status_timer.timeout.connect(self._refresh_statusline); self.status_timer.start(400)
@@ -2499,26 +2509,47 @@ class App(QWidget):
         if hasattr(self, "serial_status"):
             self.serial_status.setText(text)
 
+    def _reset_tap_history(self) -> None:
+        self._recent_intervals.clear()
+        self._last_tap_timestamp = None
+
+    def _record_tap_interval(self, host_ts: float) -> None:
+        last = self._last_tap_timestamp
+        if last is not None:
+            interval = host_ts - last
+            if interval > 0:
+                self._recent_intervals.append(interval)
+        self._last_tap_timestamp = host_ts
+
+    def _recent_rate_per_min(self) -> float | None:
+        if not self._recent_intervals:
+            return None
+        avg_interval = sum(self._recent_intervals) / len(self._recent_intervals)
+        if avg_interval <= 0:
+            return None
+        return 60.0 / avg_interval
+
     # ---------- Hardware serial processing ----------
 
     def _drain_serial_queue(self):
         if not self.serial.is_open():
             return
         while True:
-            line = self.serial.read_line_nowait()
-            if line is None:
+            item = self.serial.read_line_nowait(with_timestamp=True)
+            if item is None:
                 break
+            timestamp, line = item
             cleaned = line.strip()
             if not cleaned:
                 continue
-            self._handle_serial_line(cleaned)
+            self._handle_serial_line(cleaned, timestamp)
 
-    def _handle_serial_line(self, line: str):
+    def _handle_serial_line(self, line: str, timestamp: float | None = None):
         self._hardware_config_message = line
         if line.startswith("EVENT:"):
             payload = line[6:]
             event, _, data = payload.partition(',')
-            self._handle_hardware_event(event.strip().upper(), data.strip())
+            self._handle_hardware_event(event.strip().upper(), data.strip(), timestamp)
             return
         if line.startswith("CONFIG:"):
             self._handle_hardware_config_message(line)
@@ -2550,7 +2581,7 @@ class App(QWidget):
             if self._awaiting_switch_start:
                 self._update_status("Hardware ready. Flip the switch to begin.")
 
-    def _handle_hardware_event(self, event: str, data: str):
+    def _handle_hardware_event(self, event: str, data: str, host_ts: float | None = None):
         if event == "SWITCH":
             if hasattr(self, "serial_status"):
                 self.serial_status.setText(f"Switch {data.upper() if data else '?'}")
@@ -2558,13 +2589,13 @@ class App(QWidget):
                 self._update_status("Switch ON detected. Waiting for hardware activation…")
             return
         if event == "MODE_ACTIVATED":
-            self._on_hardware_run_started()
+            self._on_hardware_run_started(host_ts)
             return
         if event == "MODE_DEACTIVATED":
             self._on_hardware_run_stopped()
             return
         if event == "TAP":
-            self._on_hardware_tap(data)
+            self._on_hardware_tap(data, host_ts)
 
     def _compose_hardware_config(self) -> tuple[str, dict[str, object]]:
         mode_text = self.mode.currentText()
@@ -2575,7 +2606,7 @@ class App(QWidget):
         port = self.port_edit.currentText().strip()
         if mode_token == 'P':
             period_s = max(0.001, period_s)
-            calibration = self._period_calibration.get(port, 1.0) if port else 1.0
+            calibration = self._lookup_period_calibration(port)
             adjusted_period = period_s * calibration
             config_value = f"{adjusted_period:.6f}"
         else:
@@ -2594,11 +2625,12 @@ class App(QWidget):
             "rec_path": getattr(self.recorder, "path", ""),
             "timestamp": time.strftime("%Y%m%d_%H%M%S"),
             "port": port,
-            "period_calibration": self._period_calibration.get(port, 1.0) if port else 1.0,
+            "period_calibration": calibration,
         }
         return message, meta
 
-    def _on_hardware_run_started(self):
+    def _on_hardware_run_started(self, host_timestamp: float | None = None):
+        host_now = host_timestamp if host_timestamp is not None else time.monotonic()
         if self.logger is None and not self._flash_only_mode:
             self._initialize_run_logger()
         self._hardware_run_active = True
@@ -2608,8 +2640,9 @@ class App(QWidget):
         self._first_host_tap_monotonic = None
         self._last_host_tap_monotonic = None
         self.taps = 0
-        self.run_start = time.monotonic()
-        self.counters.setText("Taps: 0 | Elapsed: 0.0 s | Observed rate: 0.0 /min")
+        self.run_start = host_now
+        self._reset_tap_history()
+        self.counters.setText("Taps: 0 | Elapsed: 0 s | Rate10: -- /min | Overall: 0.0 /min")
         try:
             self.live_chart.reset()
         except Exception:
@@ -2628,10 +2661,10 @@ class App(QWidget):
         self._last_hw_tap_ms = None
         self._stop_run(from_hardware=True, reason="Hardware run stopped.")
 
-    def _on_hardware_tap(self, data: str):
+    def _on_hardware_tap(self, data: str, host_timestamp: float | None = None):
         if not self._hardware_run_active:
             return
-        host_now = time.monotonic()
+        host_now = host_timestamp if host_timestamp is not None else time.monotonic()
         if self._first_host_tap_monotonic is None:
             self._first_host_tap_monotonic = host_now
         self._last_host_tap_monotonic = host_now
@@ -2639,8 +2672,14 @@ class App(QWidget):
             self.run_start = host_now
         elapsed = host_now - self.run_start
         self.taps += 1
-        rate = (self.taps / elapsed * 60.0) if elapsed > 0 else 0.0
-        self.counters.setText(f"Taps: {self.taps} | Elapsed: {elapsed:.1f} s | Observed rate: {rate:.2f} /min")
+        self._record_tap_interval(host_now)
+        overall_rate = (self.taps / elapsed * 60.0) if elapsed > 0 else 0.0
+        recent_rate = self._recent_rate_per_min()
+        displayed_rate = recent_rate if recent_rate is not None else overall_rate
+        elapsed_display = int(round(elapsed))
+        self.counters.setText(
+            f"Taps: {self.taps} | Elapsed: {elapsed_display} s | Rate10: {displayed_rate:.2f} /min | Overall: {overall_rate:.2f} /min"
+        )
         try:
             self.live_chart.add_tap(elapsed)
         except Exception:
@@ -2923,7 +2962,8 @@ class App(QWidget):
                 self._initialize_run_logger(force=True)
                 self.run_start = time.monotonic()
                 self.taps = 0
-                self.counters.setText("Taps: 0 | Elapsed: 0.0 s | Observed rate: 0.0 /min")
+                self._reset_tap_history()
+                self.counters.setText("Taps: 0 | Elapsed: 0 s | Rate10: -- /min | Overall: 0.0 /min")
                 try:
                     self.live_chart.reset()
                 except Exception:
@@ -2954,7 +2994,8 @@ class App(QWidget):
         self._last_hw_tap_ms = None
         self.taps = 0
         self.run_start = None
-        self.counters.setText("Taps: 0 | Elapsed: 0.0 s | Observed rate: 0.0 /min")
+        self._reset_tap_history()
+        self.counters.setText("Taps: 0 | Elapsed: 0 s | Rate10: -- /min | Overall: 0.0 /min")
         try:
             self.live_chart.reset()
         except Exception:
@@ -2990,12 +3031,13 @@ class App(QWidget):
         self._hardware_configured = False
         self._last_hw_tap_ms = None
         self.taps = 0
+        self._reset_tap_history()
         self._flash_only_mode = False
         try:
             self.live_chart.reset()
         except Exception:
             pass
-        self.counters.setText("Taps: 0 | Elapsed: 0.0 s | Observed rate: 0.0 /min")
+        self.counters.setText("Taps: 0 | Elapsed: 0 s | Rate10: -- /min | Overall: 0.0 /min")
         message = reason or ("Hardware run stopped." if from_hardware else "Run stopped.")
         self._update_status(message)
         self._active_serial_port = ""
@@ -3021,7 +3063,8 @@ class App(QWidget):
         self._last_hw_tap_ms = None
         self.run_start = None
         self.taps = 0
-        self.counters.setText("Taps: 0 | Elapsed: 0.0 s | Observed rate: 0.0 /min")
+        self._reset_tap_history()
+        self.counters.setText("Taps: 0 | Elapsed: 0 s | Rate10: -- /min | Overall: 0.0 /min")
         try:
             self.live_chart.reset()
         except Exception:
@@ -3046,8 +3089,14 @@ class App(QWidget):
         self._send_serial_char('t', f"Tap ({mark})")
         self.taps += 1
         elapsed = t_host - (self.run_start or t_host)
-        rate = (self.taps/elapsed*60.0) if elapsed>0 else 0.0
-        self.counters.setText(f"Taps: {self.taps} | Elapsed: {elapsed:.1f} s | Observed rate: {rate:.2f} /min")
+        self._record_tap_interval(t_host)
+        overall_rate = (self.taps/elapsed*60.0) if elapsed>0 else 0.0
+        recent_rate = self._recent_rate_per_min()
+        displayed_rate = recent_rate if recent_rate is not None else overall_rate
+        elapsed_display = int(round(elapsed))
+        self.counters.setText(
+            f"Taps: {self.taps} | Elapsed: {elapsed_display} s | Rate10: {displayed_rate:.2f} /min | Overall: {overall_rate:.2f} /min"
+        )
         if self.logger:
             self.logger.log_tap(host_time_s=t_host, mode=self.mode.currentText(), mark=mark, stepsize=self.current_stepsize)
         if mark == "scheduled" and self.run_start:
@@ -3129,8 +3178,14 @@ class App(QWidget):
         param = f"P={self.period_sec.value():.2f}s" if mode=="Periodic" else f"λ={self.lambda_rpm.value():.2f}/min"
         taps = self.taps
         elapsed = (time.monotonic() - self.run_start) if self.run_start else 0.0
-        rate = (taps/elapsed*60.0) if elapsed>0 else 0.0
-        txt = f"{run_id}  •  cam {cam_idx}/{fps}fps  •  {rec}  •  {serial_state}  •  {mode} {param}  •  taps:{taps}  •  t+{elapsed:6.1f}s  •  rate:{rate:5.2f}/min"
+        overall_rate = (taps/elapsed*60.0) if elapsed>0 else 0.0
+        recent_rate = self._recent_rate_per_min()
+        recent_str = f"{recent_rate:5.2f}" if recent_rate is not None else "  --"
+        elapsed_sec = int(round(elapsed))
+        txt = (
+            f"{run_id}  •  cam {cam_idx}/{fps}fps  •  {rec}  •  {serial_state}  •  {mode} {param}"
+            f"  •  taps:{taps}  •  t+{elapsed_sec:6d}s  •  rate10:{recent_str}/min  •  avg:{overall_rate:5.2f}/min"
+        )
         self.statusline.setText(txt)
 
     def _update_status(self, msg): self.status.setText(msg)
@@ -3190,28 +3245,68 @@ class App(QWidget):
                     self.port_edit.setCurrentIndex(idx)
 
     def _load_calibration(self) -> dict[str, float]:
-        try:
-            with open(self._calibration_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                calibrated = {}
-                for key, value in data.items():
-                    try:
-                        calibrated[str(key)] = float(value)
-                    except Exception:
-                        continue
-                return calibrated
-        except Exception:
-            pass
+        existing_paths: list[Path] = []
+        for path in self._calibration_paths:
+            try:
+                if path.exists():
+                    existing_paths.append(path)
+            except Exception:
+                continue
+        existing_paths.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0.0, reverse=True)
+        for path in existing_paths or self._calibration_paths:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    calibrated: dict[str, float] = {}
+                    for key, value in data.items():
+                        try:
+                            calibrated[str(key)] = float(value)
+                        except Exception:
+                            continue
+                    self._active_calibration_path = path
+                    return calibrated
+            except FileNotFoundError:
+                continue
+            except Exception:
+                continue
         return {}
 
     def _save_calibration(self) -> None:
-        try:
-            self._calibration_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._calibration_path, "w", encoding="utf-8") as f:
-                json.dump(self._period_calibration, f, indent=2)
-        except Exception:
-            pass
+        for path in self._calibration_paths:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(self._period_calibration, f, indent=2)
+                self._active_calibration_path = path
+                return
+            except PermissionError:
+                continue
+            except OSError:
+                continue
+        self._update_status("Calibration save failed (check permissions).")
+
+    @staticmethod
+    def _normalized_port_key(port: str) -> str:
+        if not port:
+            return ""
+        base = port.rstrip('0123456789')
+        return base if base else port
+
+    def _lookup_period_calibration(self, port: str) -> float:
+        if not port:
+            return 1.0
+        if port in self._period_calibration:
+            return float(self._period_calibration[port])
+        key = self._normalized_port_key(port)
+        if key in self._period_calibration:
+            return float(self._period_calibration[key])
+        # Legacy fallback: allow prefix match for older files
+        if key:
+            for existing_key, value in self._period_calibration.items():
+                if existing_key.startswith(key):
+                    return float(value)
+        return 1.0
 
     def _finalize_period_calibration(self):
         if self.logger is None:
@@ -3231,14 +3326,28 @@ class App(QWidget):
             return
         if host_elapsed < 30.0:  # require at least 30s of data
             return
-        factor = host_elapsed / (board_elapsed_ms / 1000.0)
-        if abs(factor - 1.0) < 1e-4:
+        host_elapsed_ms = host_elapsed * 1000.0
+        if host_elapsed_ms <= 0:
             return
-        # Clamp to reasonable range
-        factor = max(0.95, min(1.05, factor))
+        raw_factor = board_elapsed_ms / host_elapsed_ms
+        factor = max(0.95, min(1.05, raw_factor))
+        existing = float(self._period_calibration.get(port, self._lookup_period_calibration(port)))
+        if abs(factor - existing) < 1e-4:
+            return
         self._period_calibration[port] = factor
+        norm_key = self._normalized_port_key(port)
+        if norm_key and norm_key != port:
+            self._period_calibration[norm_key] = factor
+        # Overwrite any legacy entries that share the same normalized prefix
+        if norm_key:
+            for key in list(self._period_calibration.keys()):
+                if key not in {port, norm_key} and key.startswith(norm_key):
+                    self._period_calibration[key] = factor
         self._save_calibration()
-        self._update_status(f"Calibration updated for {port}: x{factor:.6f}")
+        if abs(factor - 1.0) < 1e-4:
+            self._update_status(f"Calibration reset for {port} (x{factor:.6f})")
+        else:
+            self._update_status(f"Calibration updated for {port}: x{factor:.6f} (raw {raw_factor:.6f})")
 
     def _adjust_min_window_size(self):
         try:

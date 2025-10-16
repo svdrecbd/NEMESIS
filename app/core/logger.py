@@ -39,7 +39,7 @@ class RunLogger:
             "run_id": self.run_id,
             "tap_id": self.tap_id,
             "tap_uuid": str(uuid.uuid4()),
-            "t_host_ms": int(host_time_s * 1000.0),
+            "t_host_ms": int(round(host_time_s * 1000.0)),
             "mode": mode,
             "stepsize": stepsize if stepsize is not None else "",
             "mark": mark,
