@@ -5,6 +5,8 @@ Version: **1.0‑rc1**
 
 This document gets a new contributor from zero → productive. It summarizes the system, how to run it, how the data flow works, and what’s left to ship v1.0.
 
+> **Heads up:** The `main` branch is currently in the middle of a tabbed UI refactor. Expect camera preview glitches and other rough edges while the work lands. If you need the stable single-window panel, check out tag `1.0-rc1` (commit `0262552`).
+
 ---
 
 ## 1) What this is
@@ -16,6 +18,13 @@ A desktop acquisition app that:
 - Records MP4 video independently of tapping (can be on/off at any time)
 - Logs **every tap** to CSV (v1.0 schema) and captures **run.json** snapshot for traceability
 - Produces publishable plots from CSV via `app/core/plotter.py`
+- Anchors each tap to both host UTC and firmware clock and records the preview/recorded frame indices so video and telemetry stay aligned.
+
+### Current project (in flight)
+- Refactor the legacy single-window UI into per-run `RunTab`s plus a dashboard workspace.
+- Isolate all run state inside `RunSession` so multiple rigs can run concurrently in the future.
+- Expand the dashboard to manage historical runs (plot tweaks, export to Sheets/Excel, quick file ops).
+- Coordinate hardware resources (camera index + serial port) across tabs without conflicts.
 
 The UI is intentionally **technical & dense** (think Bloomberg/radare2), with a **Pro Mode** for keyboard‑first operation. Typestar OCR is the global font; the default loads in **Light Mode** with controls on the **left** and data on the right (75 % of the width). A custom splitter snaps to 25 % / 50 % / 75 % anchors and briefly highlights the handle when you land on a magnet so it’s easy to hit repeatable layouts without pixel hunting.
 
@@ -124,10 +133,14 @@ Columns:
 - `tap_id` – incremental counter starting at 1
 - `tap_uuid` – unique identifier per tap
 - `t_host_ms` – host monotonic time (ms) at send
+- `t_host_iso` – ISO8601 UTC timestamp (wall clock) when the host logged the tap
+- `t_fw_ms` – firmware-reported execute time (ms) so you can compare host vs controller
 - `mode` – "Periodic" | "Poisson"
 - `stepsize` – 1..5 (tap power/microstep profile)
 - `mark` – "scheduled" | "manual"
 - `notes` – freeform (reserved)
+- `frame_preview_idx` – preview frame counter at the time of the tap
+- `frame_recorded_idx` – recorded frame index (if recording active)
 - `recording_path` – path to MP4 if known when row written
 
 ### `run.json`
@@ -185,6 +198,10 @@ Snapshot of parameters captured at **Start Run**:
    - On connect: firmware string/version + echo test; show in status line.
 9. **Template export**
    - Export current config as `nemesis_config_<date>.json` for sharing.
+10. **Tabbed run management** *(in progress)*
+    - Stabilise `RunTab` sessions (serial, camera, logging) and dashboard workspace.
+    - Enforce per-tab hardware exclusivity (camera index + serial port).
+    - Add dashboard tooling (timeline trim, recolor, export to Sheets/Excel).
 
 > 🚨 **Urgent**: long-run drift exceeds 1 s/hour on some boards even after calibration. Once timing calibration hits the top of the backlog again, verify firmware scheduling + host factor and update this list.
 

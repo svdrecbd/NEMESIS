@@ -10,7 +10,16 @@ NEMESIS is a desktop tool for Stentor habituation experiments:
 - Raise/Lower Arm jog controls for fine positioning (half-step)
 - Sync LED in firmware for frame-accurate alignment
 - Structured CSV logs and plotting helpers
+- Anchored tap telemetry (UTC host timestamps, firmware clock, preview/recorded frame indices)
 
+Current Development Focus
+-------------------------
+- **UI refactor in progress.** The single-window control panel is being migrated into a tabbed shell (`RunTab` + `DashboardTab`). Expect rough edges until the multi-tab architecture is complete (camera preview is temporarily unstable on the `main` branch).
+- **Session encapsulation.** All run state (serial link, scheduler, logging, frame stream) now lives inside a `RunSession`; future tabs will spin up one session per rig.
+- **Dashboard workbench.** A new dashboard tab lists finished runs, previews their rasters, and offers quick actions (open folder, export CSV, delete). Plot customisation and exports are next.
+- **Multi-rig groundwork.** Hardware resource coordination (unique camera index + serial port per tab) is under active development; duplicated bindings are currently blocked manually.
+
+> ⚠️ **Need a stable build?** Stick to tag `1.0-rc1` (commit `0262552`) until the tabbed UI lands. The current `main` branch is intentionally unstable while we finish the refactor.
 Hardware/Firmware (upload once)
 -------------------------------
 Use the headless Arduino sketch (`firmware/arduino/stentor_habituator_stepper_v9/NEMESIS_Firmware.ino`). Serial commands:
@@ -45,7 +54,7 @@ Zoom & Navigation
 Data & Files
 ------------
 - `run_*`: folder per run (`run_YYYYMMDD_HHMMSS_<token>`, `<token>` = 6 hex chars from UUID4)
-- `taps.csv`: run_id, tap_id, tap_uuid, t_host_ms, mode, stepsize, mark, notes, recording_path
+- `taps.csv`: run_id, tap_id, tap_uuid, t_host_ms, t_host_iso, t_fw_ms, mode, stepsize, mark, notes, frame_preview_idx, frame_recorded_idx, recording_path
 - `app/core/plotter.py`: data-free `make_figure(...)` and `save_figure(...)` for raster+scatter plots
 - Planned exports: per-run JSON (config), analysis CSV, plots, and video bundle
 - `~/.nemesis/calibration.json`: per-port timing calibration written after each periodic run (used to compensate microsecond drift on future runs)

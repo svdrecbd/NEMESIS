@@ -1,15 +1,16 @@
 # app.py — NEMESIS UI (v1.0-rc1, unified feature set)
-import sys, os, time, json, uuid
+import sys, os, time, json, uuid, csv
 from pathlib import Path
-from collections import deque
 from collections.abc import Sequence
+from datetime import datetime, timezone
+from typing import Optional
 
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QFileDialog,
     QHBoxLayout, QVBoxLayout, QGridLayout, QComboBox, QSpinBox, QDoubleSpinBox,
     QLineEdit, QMessageBox, QSizePolicy, QListView, QSplitter, QStyleFactory, QFrame, QSpacerItem,
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsProxyWidget, QSplitterHandle, QMenu,
-    QGraphicsOpacityEffect
+    QGraphicsOpacityEffect, QTabWidget, QListWidget, QListWidgetItem, QInputDialog
 )
 from PySide6.QtCore import (
     QTimer, Qt, QEvent, QSize, Signal, QObject, QThread, QMetaObject, Slot, QUrl, QPoint,
@@ -18,7 +19,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QImage, QPixmap, QFontDatabase, QFont, QIcon, QPainter, QColor, QPen, QDesktopServices
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 import matplotlib.pyplot as plt
-from matplotlib.ticker import MultipleLocator, AutoLocator
+from matplotlib.ticker import MultipleLocator, AutoLocator, NullLocator
 import matplotlib as mpl
 from matplotlib import font_manager
 from serial.tools import list_ports
@@ -26,7 +27,9 @@ from serial.tools import list_ports
 # Internal modules
 from .core import video, scheduler, configio
 from .core import logger as runlogger
-from .drivers.arduino_driver import SerialLink
+from .core.session import RunSession
+from .core.runlib import RunLibrary, RunSummary
+import shutil
 import cv2
 
 # ---- Assets & Version ----
@@ -320,6 +323,10 @@ class LiveChart:
         self.times_sec.append(float(t_since_start_s))
         self._redraw()
 
+    def set_times(self, times_seconds: Sequence[float]):
+        self.times_sec = [float(v) for v in times_seconds]
+        self._redraw()
+
     def _redraw(self):
         if not self.times_sec:
             self._configure_axes("minutes", 0.0)
@@ -336,8 +343,8 @@ class LiveChart:
         regular     = [t for i, t in enumerate(ts_unit) if (i + 1) % 10 != 0]
 
         text_color = self.color("TEXT")
-        base_width = 0.9 if unit == "minutes" else 0.09
-        highlight_width = 1.6 if unit == "minutes" else 0.16
+        base_width = 0.9 if unit == "minutes" else 0.9
+        highlight_width = 1.6 if unit == "minutes" else 1.6
         if regular:
             self.ax_top.eventplot(regular, orientation="horizontal", colors=text_color, linewidth=base_width)
         if highlighted:
@@ -393,9 +400,9 @@ class LiveChart:
             locator_top = AutoLocator()
             locator_bot = AutoLocator()
             ax_top.xaxis.set_major_locator(locator_top)
-            ax_top.xaxis.set_minor_locator(None)
+            ax_top.xaxis.set_minor_locator(NullLocator())
             ax_bot.xaxis.set_major_locator(locator_bot)
-            ax_bot.xaxis.set_minor_locator(None)
+            ax_bot.xaxis.set_minor_locator(NullLocator())
             ax_bot.set_xlabel("Time (hours)")
             ax_top.grid(True, which="major", axis="x", linestyle=":", alpha=0.9)
             ax_bot.grid(True, which="major", axis="x", linestyle=":", alpha=0.9)
@@ -1419,7 +1426,7 @@ class PinnedPreviewWindow(QWidget):
         super().closeEvent(event)
 
 
-class App(QWidget):
+class RunTab(QWidget):
     class StyledCombo(QComboBox):
         def __init__(self, popup_qss: str = "", *args, **kwargs):
             super().__init__(*args, **kwargs)
@@ -1760,13 +1767,7 @@ class App(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"NEMESIS {APP_VERSION} — Non-periodic Event Monitoring & Evaluation of Stimulus-Induced States")
-        if LOGO_PATH.exists():
-            self.setWindowIcon(QIcon(str(LOGO_PATH)))
-        self.resize(1260, 800)
         self.ui_scale = 1.0
-        # Bring back a sensible minimum window size to avoid collapsing
-        self.setMinimumSize(900, 540)
         self._theme_name = _ACTIVE_THEME_NAME
         self._theme = dict(active_theme())
         self._mirror_mode = True
@@ -1827,7 +1828,7 @@ class App(QWidget):
 
         # ---------- Scheduler controls ----------
         popup_qss = self._build_combo_popup_qss()
-        self.mode = App.StyledCombo(popup_qss=popup_qss); self.mode.addItems(["Periodic", "Poisson"])
+        self.mode = RunTab.StyledCombo(popup_qss=popup_qss); self.mode.addItems(["Periodic", "Poisson"])
         # Stabilize width and style popup to avoid clipping
         self.mode.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         fm = self.mode.fontMetrics()
@@ -1851,7 +1852,7 @@ class App(QWidget):
         self.lambda_rpm.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
         # Stepsize (1..5) — sent to firmware, logged per-tap
-        self.stepsize = App.StyledCombo(popup_qss=popup_qss)
+        self.stepsize = RunTab.StyledCombo(popup_qss=popup_qss)
         self.stepsize.addItems(["-", "1 (Full Step)","2 (Half Step)","3 (1/4 Step)","4 (1/8 Step)","5 (1/16 Step)"])
         self.stepsize.setCurrentIndex(0)
         self.stepsize.currentTextChanged.connect(self._on_stepsize_changed)
@@ -1879,6 +1880,8 @@ class App(QWidget):
         # Run controls
         self.run_start_btn = QPushButton("Start Run")
         self.run_stop_btn  = QPushButton("Stop Run")
+        self.clear_data_btn = QPushButton("Clear Data")
+        self.clear_data_btn.setToolTip("Reset the counters and live chart manually.")
 
         # Output directory
         self.outdir_edit = QLineEdit()
@@ -2104,7 +2107,7 @@ class App(QWidget):
 
         # Seed / run / output configuration cluster
         r3b = QHBoxLayout(); r3b.addWidget(QLabel("Seed:")); r3b.addWidget(self.seed_edit,1)
-        r4 = QHBoxLayout(); r4.addWidget(self.run_start_btn); r4.addWidget(self.run_stop_btn)
+        r4 = QHBoxLayout(); r4.addWidget(self.run_start_btn); r4.addWidget(self.run_stop_btn); r4.addWidget(self.clear_data_btn)
         r5 = QHBoxLayout(); r5.addWidget(QLabel("Output dir:")); r5.addWidget(self.outdir_edit,1); r5.addWidget(self.outdir_btn)
 
         # Config save/load row (was missing from layout)
@@ -2238,39 +2241,15 @@ class App(QWidget):
         self._frame_thread: QThread | None = None
         self._frame_worker: FrameWorker | None = None
         self.run_timer   = QTimer(self); self.run_timer.setSingleShot(True); self.run_timer.timeout.connect(self._on_tap_due)
-        self.scheduler = scheduler.TapScheduler()
-        self.serial    = SerialLink()
-        self.logger    = None
-        self.run_dir   = None
-        self.run_start = None
-        self.taps = 0; self.preview_fps = 30; self.current_stepsize = 4
-        self._recent_intervals: deque[float] = deque(maxlen=10)
-        self._last_tap_timestamp: float | None = None
-        self._reset_tap_history()
-        self._pip_window: PinnedPreviewWindow | None = None
-        self._hardware_run_active = False
-        self._awaiting_switch_start = False
-        self._hardware_configured = False
-        self._hardware_config_message = ""
-        self._pending_run_metadata: dict[str, object] | None = None
-        self._last_hw_tap_ms: float | None = None
-        self._flash_only_mode = False
-        self._first_hw_tap_ms: float | None = None
-        self._first_host_tap_monotonic: float | None = None
-        self._last_host_tap_monotonic: float | None = None
-        self._active_serial_port: str = ""
-        self._calibration_paths: tuple[Path, ...] = (
-            Path.home() / ".nemesis" / "calibration.json",
-            BASE_DIR / "runs" / "calibration.json",
-        )
-        self._active_calibration_path: Path | None = None
-        self._period_calibration: dict[str, float] = self._load_calibration()
-        if self._active_calibration_path is None:
-            self._active_calibration_path = self._calibration_paths[0]
-
+        self.session = RunSession()
+        self.session.reset_runtime_state()
         # Dense status line updater
-        self.status_timer = QTimer(self); self.status_timer.timeout.connect(self._refresh_statusline); self.status_timer.start(400)
-        self.serial_timer = QTimer(self); self.serial_timer.setInterval(50); self.serial_timer.timeout.connect(self._drain_serial_queue)
+        self.status_timer = QTimer(self)
+        self.status_timer.timeout.connect(self._refresh_statusline)
+        self.status_timer.start(400)
+        self.serial_timer = QTimer(self)
+        self.serial_timer.setInterval(50)
+        self.serial_timer.timeout.connect(self._drain_serial_queue)
 
         # ---------- Signals ----------
         self.cam_btn.clicked.connect(self._open_camera)
@@ -2284,18 +2263,195 @@ class App(QWidget):
         self.rec_stop_btn.clicked.connect(self._stop_recording)
         self.run_start_btn.clicked.connect(self._start_run)
         self.run_stop_btn.clicked.connect(self._stop_run)
+        self.clear_data_btn.clicked.connect(self._clear_run_data)
         self.outdir_btn.clicked.connect(self._choose_outdir)
         self.mode.currentIndexChanged.connect(self._mode_changed)
         self.save_cfg_btn.clicked.connect(self._save_config_clicked)
         self.load_cfg_btn.clicked.connect(self._load_config_clicked)
+        self.pro_btn.clicked.connect(self._toggle_pro_mode)
+        self.seed_edit.returnPressed.connect(self._on_seed_entered)
+        self.period_sec.valueChanged.connect(lambda _v: self._update_status("Period updated."))
+        self.lambda_rpm.valueChanged.connect(lambda _v: self._update_status("Lambda updated."))
+        self.stepsize.currentTextChanged.connect(self._on_stepsize_changed)
+        self.port_edit.editTextChanged.connect(self._on_port_text_changed)
 
         # Install global event filter for pinch zoom (app-wide)
         try:
             QApplication.instance().installEventFilter(self)
         except Exception:
             pass
-        self._mode_changed(); self._update_status("Ready.")
+        self._mode_changed()
+        self._update_status("Ready.")
         self._reset_serial_indicator()
+        self.preview_fps = 30
+        self.current_stepsize = 4
+        self._pip_window: PinnedPreviewWindow | None = None
+        self._hardware_config_message = ""
+        self._calibration_paths: tuple[Path, ...] = (
+            Path.home() / ".nemesis" / "calibration.json",
+            BASE_DIR / "runs" / "calibration.json",
+        )
+        self._active_calibration_path: Path | None = None
+        self._period_calibration: dict[str, float] = self._load_calibration()
+        if self._active_calibration_path is None:
+            self._active_calibration_path = self._calibration_paths[0]
+
+    # ---- Session property shortcuts (for compatibility during refactor) ----
+    @property
+    def scheduler(self):
+        return self.session.scheduler
+
+    @property
+    def serial(self):
+        return self.session.serial
+
+    @property
+    def logger(self):
+        return self.session.logger
+
+    @logger.setter
+    def logger(self, value):
+        self.session.logger = value
+
+    @property
+    def run_dir(self):
+        return self.session.run_dir
+
+    @run_dir.setter
+    def run_dir(self, value):
+        self.session.run_dir = value
+
+    @property
+    def run_start(self):
+        return self.session.run_start
+
+    @run_start.setter
+    def run_start(self, value):
+        self.session.run_start = value
+
+    @property
+    def taps(self):
+        return self.session.taps
+
+    @taps.setter
+    def taps(self, value):
+        self.session.taps = value
+
+    @property
+    def _pending_run_metadata(self):
+        return self.session.pending_run_metadata
+
+    @_pending_run_metadata.setter
+    def _pending_run_metadata(self, value):
+        self.session.pending_run_metadata = value
+
+    @property
+    def _hardware_run_active(self):
+        return self.session.hardware_run_active
+
+    @_hardware_run_active.setter
+    def _hardware_run_active(self, value):
+        self.session.hardware_run_active = value
+
+    @property
+    def _awaiting_switch_start(self):
+        return self.session.awaiting_switch_start
+
+    @_awaiting_switch_start.setter
+    def _awaiting_switch_start(self, value):
+        self.session.awaiting_switch_start = value
+
+    @property
+    def _hardware_configured(self):
+        return self.session.hardware_configured
+
+    @_hardware_configured.setter
+    def _hardware_configured(self, value):
+        self.session.hardware_configured = value
+
+    @property
+    def _last_hw_tap_ms(self):
+        return self.session.last_hw_tap_ms
+
+    @_last_hw_tap_ms.setter
+    def _last_hw_tap_ms(self, value):
+        self.session.last_hw_tap_ms = value
+
+    @property
+    def _flash_only_mode(self):
+        return self.session.flash_only_mode
+
+    @_flash_only_mode.setter
+    def _flash_only_mode(self, value):
+        self.session.flash_only_mode = value
+
+    @property
+    def _first_hw_tap_ms(self):
+        return self.session.first_hw_tap_ms
+
+    @_first_hw_tap_ms.setter
+    def _first_hw_tap_ms(self, value):
+        self.session.first_hw_tap_ms = value
+
+    @property
+    def _first_host_tap_monotonic(self):
+        return self.session.first_host_tap_monotonic
+
+    @_first_host_tap_monotonic.setter
+    def _first_host_tap_monotonic(self, value):
+        self.session.first_host_tap_monotonic = value
+
+    @property
+    def _last_host_tap_monotonic(self):
+        return self.session.last_host_tap_monotonic
+
+    @_last_host_tap_monotonic.setter
+    def _last_host_tap_monotonic(self, value):
+        self.session.last_host_tap_monotonic = value
+
+    @property
+    def _active_serial_port(self):
+        return self.session.active_serial_port
+
+    @_active_serial_port.setter
+    def _active_serial_port(self, value):
+        self.session.active_serial_port = value
+
+    def _reset_tap_history(self) -> None:
+        self.session.reset_tap_history()
+
+    def _record_tap_interval(self, host_ts: float) -> None:
+        self.session.record_tap_interval(host_ts)
+
+    def _recent_rate_per_min(self) -> float | None:
+        return self.session.recent_rate_per_min()
+
+    def _reset_frame_counters(self) -> None:
+        self.session.reset_frame_counters()
+
+    @property
+    def _last_run_elapsed(self):
+        return self.session.last_run_elapsed
+
+    @_last_run_elapsed.setter
+    def _last_run_elapsed(self, value):
+        self.session.last_run_elapsed = value
+
+    @property
+    def _preview_frame_counter(self):
+        return self.session.preview_frame_counter
+
+    @_preview_frame_counter.setter
+    def _preview_frame_counter(self, value):
+        self.session.preview_frame_counter = value
+
+    @property
+    def _recorded_frame_counter(self):
+        return self.session.recorded_frame_counter
+
+    @_recorded_frame_counter.setter
+    def _recorded_frame_counter(self, value):
+        self.session.recorded_frame_counter = value
 
     def _update_section_spacers(self):
         spacers = getattr(self, "_section_spacers", None)
@@ -2453,7 +2609,7 @@ class App(QWidget):
         key = event.key()
         if key == Qt.Key_Space: self._send_tap("manual"); return
         if key == Qt.Key_R: self._stop_recording() if self.recorder else self._start_recording(); return
-        if key == Qt.Key_S: self._start_run() if self.logger is None else self._stop_run(); return
+        if key == Qt.Key_S: self._start_run() if self.session.logger is None else self._stop_run(); return
         if key == Qt.Key_E: self._send_serial_char('e', "Enable motor"); return
         if key == Qt.Key_D: self._send_serial_char('d', "Disable motor"); return
         if key in (Qt.Key_1, Qt.Key_2, Qt.Key_3, Qt.Key_4, Qt.Key_5):
@@ -2510,24 +2666,16 @@ class App(QWidget):
             self.serial_status.setText(text)
 
     def _reset_tap_history(self) -> None:
-        self._recent_intervals.clear()
-        self._last_tap_timestamp = None
+        self.session.reset_tap_history()
+
+    def _reset_frame_counters(self) -> None:
+        self.session.reset_frame_counters()
 
     def _record_tap_interval(self, host_ts: float) -> None:
-        last = self._last_tap_timestamp
-        if last is not None:
-            interval = host_ts - last
-            if interval > 0:
-                self._recent_intervals.append(interval)
-        self._last_tap_timestamp = host_ts
+        self.session.record_tap_interval(host_ts)
 
     def _recent_rate_per_min(self) -> float | None:
-        if not self._recent_intervals:
-            return None
-        avg_interval = sum(self._recent_intervals) / len(self._recent_intervals)
-        if avg_interval <= 0:
-            return None
-        return 60.0 / avg_interval
+        return self.session.recent_rate_per_min()
 
     # ---------- Hardware serial processing ----------
 
@@ -2570,7 +2718,7 @@ class App(QWidget):
             if hasattr(self, "serial_status"):
                 self.serial_status.setText(line)
             self._update_status(f"Hardware configuration failed: {line}")
-            if self.logger or self._pending_run_metadata is not None:
+            if self.session.logger or self.session.pending_run_metadata is not None:
                 self._stop_run(from_hardware=True, reason="Hardware configuration failed.")
         elif line.startswith("CONFIG:STEPSIZE"):
             if hasattr(self, "serial_status"):
@@ -2629,12 +2777,70 @@ class App(QWidget):
         }
         return message, meta
 
+    def _clear_run_data(self):
+        if self.session.hardware_run_active:
+            QMessageBox.information(self, "Run Active", "Stop the run before clearing.")
+            return
+        try:
+            self.live_chart.reset()
+        except Exception:
+            pass
+        self._reset_tap_history()
+        self._reset_frame_counters()
+        self.taps = 0
+        self.run_start = None
+        self._last_run_elapsed = 0.0
+        self._first_hw_tap_ms = None
+        self._first_host_tap_monotonic = None
+        self._last_host_tap_monotonic = None
+        self._update_status("Run data cleared.")
+        self.counters.setText("Taps: 0 | Elapsed: 0 s | Rate10: -- /min | Overall: 0.0 /min")
+        self._refresh_statusline()
+
+    def _flash_hardware_config(self):
+        if not self.serial.is_open():
+            QMessageBox.warning(self, "Serial", "Connect to the controller before flashing the configuration.")
+            return
+        while self.serial.read_line_nowait() is not None:
+            pass
+        message, meta = self._compose_hardware_config()
+        self.serial.send_text(message)
+        self._record_serial_command("FLASH", "Config payload sent")
+        self.session.hardware_configured = False
+        self.session.awaiting_switch_start = True
+        self.session.hardware_run_active = False
+        self.session.flash_only_mode = True
+        meta["source"] = "flash"
+        self._pending_run_metadata = meta
+        self._last_hw_tap_ms = None
+        self.run_start = None
+        self.taps = 0
+        self._reset_tap_history()
+        self._reset_frame_counters()
+        self.counters.setText("Taps: 0 | Elapsed: 0 s | Rate10: -- /min | Overall: 0.0 /min")
+        try:
+            self.live_chart.reset()
+        except Exception:
+            pass
+        self._active_serial_port = meta.get("port", self.port_edit.currentText().strip())
+        self._update_status("Config flashed for testing. Flip the switch to move; press Start Run to log data.")
+        self._send_serial_char('e', "Enable motor")
+
+    def _manual_tap(self):
+        self._send_tap("manual")
+
+    def _on_tap_due(self):
+        self._send_tap("scheduled")
+        delay = self.session.scheduler.next_delay_s()
+        self.run_timer.start(int(delay * 1000))
+        self._update_status(f"Tap sent. Next in {delay:.3f}s")
+
     def _on_hardware_run_started(self, host_timestamp: float | None = None):
         host_now = host_timestamp if host_timestamp is not None else time.monotonic()
-        if self.logger is None and not self._flash_only_mode:
+        if self.session.logger is None and not self.session.flash_only_mode:
             self._initialize_run_logger()
-        self._hardware_run_active = True
-        self._awaiting_switch_start = False
+        self.session.hardware_run_active = True
+        self.session.awaiting_switch_start = False
         self._first_hw_tap_ms = None
         self._last_hw_tap_ms = None
         self._first_host_tap_monotonic = None
@@ -2642,23 +2848,24 @@ class App(QWidget):
         self.taps = 0
         self.run_start = host_now
         self._reset_tap_history()
+        self._reset_frame_counters()
         self.counters.setText("Taps: 0 | Elapsed: 0 s | Rate10: -- /min | Overall: 0.0 /min")
         try:
             self.live_chart.reset()
         except Exception:
             pass
-        if self.logger is None:
+        if self.session.logger is None:
             self._update_status("Hardware run active (not logging). Press Start Run to capture data.")
         else:
             self._update_status("Hardware run active.")
-        self._flash_only_mode = False
+        self.session.flash_only_mode = False
 
     def _on_hardware_run_stopped(self):
-        if not self._hardware_run_active and not self._awaiting_switch_start:
+        if not self.session.hardware_run_active and not self.session.awaiting_switch_start:
             return
-        self._hardware_run_active = False
-        self._awaiting_switch_start = False
-        self._last_hw_tap_ms = None
+        self.session.hardware_run_active = False
+        self.session.awaiting_switch_start = False
+        self.session.last_hw_tap_ms = None
         self._stop_run(from_hardware=True, reason="Hardware run stopped.")
 
     def _on_hardware_tap(self, data: str, host_timestamp: float | None = None):
@@ -2675,11 +2882,13 @@ class App(QWidget):
         self._record_tap_interval(host_now)
         overall_rate = (self.taps / elapsed * 60.0) if elapsed > 0 else 0.0
         recent_rate = self._recent_rate_per_min()
-        displayed_rate = recent_rate if recent_rate is not None else overall_rate
+        recent_str = f"{recent_rate:.2f}" if recent_rate is not None else "--"
+        overall_str = f"{overall_rate:.2f}" if elapsed > 0 else "--"
         elapsed_display = int(round(elapsed))
         self.counters.setText(
-            f"Taps: {self.taps} | Elapsed: {elapsed_display} s | Rate10: {displayed_rate:.2f} /min | Overall: {overall_rate:.2f} /min"
+            f"Taps: {self.taps} | Elapsed: {elapsed_display} s | Rate10: {recent_str} /min | Overall: {overall_str} /min"
         )
+        self._last_run_elapsed = elapsed if elapsed > 0 else self._last_run_elapsed
         try:
             self.live_chart.add_tap(elapsed)
         except Exception:
@@ -2690,11 +2899,25 @@ class App(QWidget):
                 if self._first_hw_tap_ms is None:
                     self._first_hw_tap_ms = value
                 self._last_hw_tap_ms = value
+            else:
+                value = None
         except Exception:
             self._last_hw_tap_ms = None
+            value = None
         if self.logger:
             note = f"hw_ms={data}" if data else None
-            self.logger.log_tap(host_time_s=host_now, mode=self.mode.currentText(), mark="hardware", stepsize=self.current_stepsize, notes=note)
+            host_iso = datetime.now(timezone.utc).isoformat()
+            self.logger.log_tap(
+                host_time_s=host_now,
+                mode=self.mode.currentText(),
+                mark="hardware",
+                stepsize=self.current_stepsize,
+                notes=note,
+                host_iso=host_iso,
+                firmware_ms=value,
+                preview_frame_idx=self._preview_frame_counter,
+                recorded_frame_idx=self._recorded_frame_counter,
+            )
 
     def _initialize_run_logger(self, force: bool = False):
         if self.logger is not None and not force:
@@ -2720,12 +2943,12 @@ class App(QWidget):
         self.run_dir = run_dir
 
         seed = meta.get("seed", self._seed_value_or_none())
-        self.scheduler.set_seed(seed)
+        self.session.scheduler.set_seed(seed)
         mode_token = meta.get("mode", 'P')
         if mode_token == 'P':
-            self.scheduler.configure_periodic(meta.get("period_sec", float(self.period_sec.value())))
+            self.session.scheduler.configure_periodic(meta.get("period_sec", float(self.period_sec.value())))
         else:
-            self.scheduler.configure_poisson(meta.get("lambda_rpm", float(self.lambda_rpm.value())))
+            self.session.scheduler.configure_poisson(meta.get("lambda_rpm", float(self.lambda_rpm.value())))
 
         run_json = {
             "run_id": self.logger.run_id,
@@ -2740,7 +2963,7 @@ class App(QWidget):
             "lambda_rpm": meta.get("lambda_rpm", float(self.lambda_rpm.value())),
             "seed": seed,
             "stepsize": meta.get("stepsize", self.current_stepsize),
-            "scheduler": self.scheduler.descriptor(),
+            "scheduler": self.session.scheduler.descriptor(),
             "hardware_trigger": "switch",
             "config_source": meta.get("source", "unknown"),
         }
@@ -2873,6 +3096,7 @@ class App(QWidget):
         self.recorder = video.VideoRecorder(str(requested_path), fps=self.preview_fps, frame_size=(w, h))
         if not self.recorder.is_open():
             self.recorder = None; QMessageBox.warning(self, "Recorder", "Failed to start MP4 recorder."); return
+        self._recorded_frame_counter = 0
         # Use the actual path (handles fallback to .avi)
         actual_path = Path(self.recorder.path)
         # If a run is already active, inject path into logger for subsequent rows
@@ -2939,6 +3163,14 @@ class App(QWidget):
         try: return int(txt)
         except Exception: return None
 
+    def _on_seed_entered(self):
+        value = self._seed_value_or_none()
+        if value is None:
+            self.seed_edit.setText("")
+            self._update_status("Seed cleared.")
+        else:
+            self._update_status(f"Seed set to {value}.")
+
     # ---------- Scheduler / Run ----------
     def _mode_changed(self):
         is_periodic = (self.mode.currentText() == "Periodic")
@@ -2963,6 +3195,8 @@ class App(QWidget):
                 self.run_start = time.monotonic()
                 self.taps = 0
                 self._reset_tap_history()
+                self._reset_frame_counters()
+                self._last_run_elapsed = 0.0
                 self.counters.setText("Taps: 0 | Elapsed: 0 s | Rate10: -- /min | Overall: 0.0 /min")
                 try:
                     self.live_chart.reset()
@@ -2995,6 +3229,8 @@ class App(QWidget):
         self.taps = 0
         self.run_start = None
         self._reset_tap_history()
+        self._reset_frame_counters()
+        self._last_run_elapsed = 0.0
         self.counters.setText("Taps: 0 | Elapsed: 0 s | Rate10: -- /min | Overall: 0.0 /min")
         try:
             self.live_chart.reset()
@@ -3021,6 +3257,11 @@ class App(QWidget):
         if self.logger:
             self.logger.close()
             self.logger = None
+        if self.run_start is not None:
+            try:
+                self._last_run_elapsed = max(0.0, time.monotonic() - self.run_start)
+            except Exception:
+                self._last_run_elapsed = 0.0
         self.run_dir = None
         self.run_start = None
         self._pending_run_metadata = None
@@ -3030,56 +3271,620 @@ class App(QWidget):
         self._awaiting_switch_start = False
         self._hardware_configured = False
         self._last_hw_tap_ms = None
-        self.taps = 0
-        self._reset_tap_history()
         self._flash_only_mode = False
-        try:
-            self.live_chart.reset()
-        except Exception:
-            pass
-        self.counters.setText("Taps: 0 | Elapsed: 0 s | Rate10: -- /min | Overall: 0.0 /min")
         message = reason or ("Hardware run stopped." if from_hardware else "Run stopped.")
         self._update_status(message)
         self._active_serial_port = ""
         self._first_hw_tap_ms = None
         self._first_host_tap_monotonic = None
         self._last_host_tap_monotonic = None
+        self._refresh_statusline()
 
-    def _flash_hardware_config(self):
-        if not self.serial.is_open():
-            QMessageBox.warning(self, "Serial", "Connect to the controller before flashing the configuration.")
+
+class DashboardTab(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.library = RunLibrary(BASE_DIR)
+        self.current_summary: Optional[RunSummary] = None
+        self.current_times: list[float] = []
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(12)
+
+        # Run list
+        list_panel = QVBoxLayout()
+        list_panel.setContentsMargins(0, 0, 0, 0)
+        list_panel.setSpacing(6)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(6)
+        header_label = QLabel("Runs")
+        header_label.setStyleSheet("font-weight:bold;")
+        header.addWidget(header_label)
+        header.addStretch(1)
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.clicked.connect(self.refresh_runs)
+        header.addWidget(self.refresh_btn)
+        list_panel.addLayout(header)
+
+        self.run_list = QListWidget()
+        self.run_list.itemSelectionChanged.connect(self._on_run_selected)
+        list_panel.addWidget(self.run_list, 1)
+
+        root.addLayout(list_panel, 0)
+
+        # Detail / chart panel
+        detail_panel = QVBoxLayout()
+        detail_panel.setContentsMargins(0, 0, 0, 0)
+        detail_panel.setSpacing(10)
+
+        self.info_label = QLabel("Select a run to inspect logs and metrics.")
+        self.info_label.setWordWrap(True)
+        self.info_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        detail_panel.addWidget(self.info_label)
+
+        # Chart reuse LiveChart
+        chart_frame = QFrame()
+        chart_frame.setStyleSheet(f"background: {BG}; border: 1px solid {BORDER};")
+        chart_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        chart_layout = QVBoxLayout(chart_frame)
+        chart_layout.setContentsMargins(0, 0, 0, 0)
+        chart_layout.setSpacing(0)
+        self.chart = LiveChart(font_family=_FONT_FAMILY, theme=active_theme())
+        chart_layout.addWidget(self.chart.canvas)
+        detail_panel.addWidget(chart_frame, 1)
+
+        # Action buttons
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setSpacing(8)
+        self.open_btn = QPushButton("Open Folder")
+        self.open_btn.clicked.connect(self._open_run_folder)
+        self.export_btn = QPushButton("Export CSV…")
+        self.export_btn.clicked.connect(self._export_run_csv)
+        self.delete_btn = QPushButton("Delete…")
+        self.delete_btn.clicked.connect(self._delete_run)
+        for btn in (self.open_btn, self.export_btn, self.delete_btn):
+            btn.setEnabled(False)
+        action_row.addWidget(self.open_btn)
+        action_row.addWidget(self.export_btn)
+        action_row.addWidget(self.delete_btn)
+        action_row.addStretch(1)
+        detail_panel.addLayout(action_row)
+
+        root.addLayout(detail_panel, 1)
+
+        self.refresh_runs()
+
+    # ---- Run list management ----
+
+    def refresh_runs(self):
+        self.run_list.clear()
+        runs = self.library.list_runs()
+        for summary in runs:
+            item = QListWidgetItem(summary.run_id)
+            item.setData(Qt.UserRole, summary)
+            self.run_list.addItem(item)
+        if runs:
+            self.run_list.setCurrentRow(0)
+        else:
+            self._set_current_summary(None)
+
+    def _on_run_selected(self):
+        item = self.run_list.currentItem()
+        summary = item.data(Qt.UserRole) if item else None
+        self._set_current_summary(summary)
+
+    def _set_current_summary(self, summary: Optional[RunSummary]):
+        self.current_summary = summary
+        self.current_times = []
+        enabled = summary is not None
+        for btn in (self.open_btn, self.export_btn, self.delete_btn):
+            btn.setEnabled(enabled)
+        if summary is None:
+            self.info_label.setText("Select a run to inspect logs and metrics.")
+            self.chart.reset()
             return
-        while self.serial.read_line_nowait() is not None:
-            pass
-        message, meta = self._compose_hardware_config()
-        self.serial.send_text(message)
-        self._record_serial_command("FLASH", "Config payload sent")
-        self._hardware_configured = False
-        self._awaiting_switch_start = True
-        self._hardware_run_active = False
-        self._flash_only_mode = True
-        meta["source"] = "flash"
-        self._pending_run_metadata = meta
-        self._last_hw_tap_ms = None
-        self.run_start = None
-        self.taps = 0
-        self._reset_tap_history()
-        self.counters.setText("Taps: 0 | Elapsed: 0 s | Rate10: -- /min | Overall: 0.0 /min")
+
+        self.info_label.setText(self._format_summary(summary))
+        self.current_times = self._load_run_times(summary)
+        if self.current_times:
+            self.chart.set_times(self.current_times)
+        else:
+            self.chart.reset()
+
+    def _format_summary(self, summary: RunSummary) -> str:
+        parts = [f"<b>{summary.run_id}</b>"]
+        if summary.started_at:
+            parts.append(f"Started: {summary.started_at}")
+        if summary.duration_s is not None:
+            parts.append(f"Duration: {summary.duration_s/60:.1f} min")
+        if summary.taps_count is not None:
+            parts.append(f"Taps: {summary.taps_count}")
+        if summary.mode:
+            if summary.mode == "Periodic" and summary.period_sec:
+                parts.append(f"Mode: Periodic ({summary.period_sec:.2f}s)")
+            elif summary.mode == "Poisson" and summary.lambda_rpm:
+                parts.append(f"Mode: Poisson ({summary.lambda_rpm:.2f}/min)")
+            else:
+                parts.append(f"Mode: {summary.mode}")
+        if summary.stepsize is not None:
+            parts.append(f"Stepsize: {summary.stepsize}")
+        if summary.serial_port:
+            parts.append(f"Serial: {summary.serial_port}")
+        return "<br>".join(parts)
+
+    def _load_run_times(self, summary: RunSummary) -> list[float]:
+        taps_path = summary.path / "taps.csv"
+        times: list[float] = []
+        if not taps_path.exists():
+            return times
         try:
-            self.live_chart.reset()
+            with taps_path.open("r", encoding="utf-8", newline="") as fh:
+                reader = csv.DictReader(fh)
+                first_host = None
+                for row in reader:
+                    t_ms = float(row.get("t_host_ms", 0.0))
+                    if first_host is None:
+                        first_host = t_ms
+                    times.append((t_ms - first_host) / 1000.0)
+        except Exception:
+            return []
+        return times
+
+    # ---- Actions ----
+
+    def _require_summary(self) -> Optional[RunSummary]:
+        if self.current_summary is None:
+            QMessageBox.information(self, "Dashboard", "Select a run first.")
+            return None
+        return self.current_summary
+
+    def _open_run_folder(self):
+        summary = self._require_summary()
+        if not summary:
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(summary.path.resolve())))
+
+    def _export_run_csv(self):
+        summary = self._require_summary()
+        if not summary:
+            return
+        dest, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export taps.csv",
+            str(summary.path / "taps.csv"),
+            "CSV Files (*.csv)",
+        )
+        if not dest:
+            return
+        try:
+            shutil.copy2(summary.path / "taps.csv", dest)
+        except Exception as exc:
+            QMessageBox.warning(self, "Export", f"Failed to export CSV: {exc}")
+
+    def _delete_run(self):
+        summary = self._require_summary()
+        if not summary:
+            return
+        resp = QMessageBox.question(
+            self,
+            "Delete Run",
+            f"Delete run '{summary.run_id}'? This cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if resp != QMessageBox.Yes:
+            return
+        try:
+            shutil.rmtree(summary.path)
+        except Exception as exc:
+            QMessageBox.warning(self, "Delete", f"Failed to delete run: {exc}")
+            return
+        self.refresh_runs()
+
+
+def _run_tab_auto_detect_serial_port(self) -> str | None:
+    try:
+        ports = list(list_ports.comports())
+    except Exception:
+        ports = []
+    if not ports:
+        return None
+    preferred = [
+        "cu.usbmodem", "tty.usbmodem", "cu.usbserial", "tty.usbserial",
+        "ttyacm", "ttyusb"
+    ]
+
+    def port_score(name: str) -> int:
+        lower = name.lower()
+        for idx, prefix in enumerate(preferred):
+            if prefix in lower:
+                return len(preferred) - idx
+        if lower.startswith("com"):
+            return 1
+        return 0
+
+    best = None
+    best_score = -1
+    for info in ports:
+        name = info.device
+        score = port_score(name)
+        if score > best_score:
+            best_score = score
+            best = name
+    if best:
+        return best
+    return ports[0].device
+
+
+def _run_tab_refresh_serial_ports(self, initial: bool = False):
+    try:
+        ports = list(list_ports.comports())
+    except Exception:
+        ports = []
+    existing = {self.port_edit.itemText(i) for i in range(self.port_edit.count())}
+    for info in ports:
+        name = info.device
+        if name not in existing:
+            self.port_edit.addItem(name)
+            existing.add(name)
+    if initial and ports:
+        autodetected = self._auto_detect_serial_port()
+        if autodetected:
+            idx = self.port_edit.findText(autodetected, Qt.MatchFixedString)
+            if idx == -1:
+                self.port_edit.addItem(autodetected)
+                idx = self.port_edit.findText(autodetected, Qt.MatchFixedString)
+            if idx != -1:
+                self.port_edit.setCurrentIndex(idx)
+
+
+RunTab._auto_detect_serial_port = _run_tab_auto_detect_serial_port
+RunTab._refresh_serial_ports = _run_tab_refresh_serial_ports
+
+
+def _run_tab_adjust_min_window_size(self):
+    try:
+        content = self.app_view._content if hasattr(self.app_view, '_content') else None
+        if content is None:
+            return
+        min_hint = content.minimumSizeHint()
+        if not min_hint.isValid() or min_hint.width() <= 0:
+            min_hint = content.sizeHint()
+        vw = self.app_view.viewport().width()
+        vh = self.app_view.viewport().height()
+        aw = self.app_view.width()
+        ah = self.app_view.height()
+        delta_w = max(0, aw - vw)
+        delta_h = max(0, ah - vh)
+        extra_w = self.width() - self.centralWidgetWidth() if hasattr(self, 'centralWidgetWidth') else 0
+        extra_h = self.height() - self.centralWidgetHeight() if hasattr(self, 'centralWidgetHeight') else 0
+        min_w = max(900, min_hint.width() + delta_w + extra_w)
+        min_h = max(540, min_hint.height() + delta_h + extra_h)
+        self.setMinimumSize(min_w, min_h)
+    except Exception:
+        pass
+
+
+def _run_tab_init_splitter_balance(self):
+    split = getattr(self, 'splitter', None)
+    if split is None:
+        return
+    try:
+        total = max(1, self.width())
+        right = int(round(total * 0.75))
+        left = max(360, total - right)
+        split.set_pane_sizes([left, right])
+    except Exception:
+        pass
+
+
+def _run_tab_apply_titlebar_theme(self):
+    handle = None
+    try:
+        handle = self.windowHandle()
+    except Exception:
+        handle = None
+    applied = False
+    if handle is not None:
+        try:
+            handle.setTitleBarColor(QColor(BG))
+            if hasattr(handle, "setTitleBarAutoTint"):
+                handle.setTitleBarAutoTint(False)
+            applied = True
+        except Exception:
+            applied = False
+    if not applied:
+        try:
+            _set_macos_titlebar_appearance(self, QColor(BG))
         except Exception:
             pass
-        self._active_serial_port = meta.get("port", self.port_edit.currentText().strip())
-        self._update_status("Config flashed for testing. Flip the switch to move; press Start Run to log data.")
-        self._send_serial_char('e', "Enable motor")
 
-    def _manual_tap(self): self._send_tap("manual")
 
-    def _on_tap_due(self):
-        self._send_tap("scheduled")
-        delay = self.scheduler.next_delay_s()
-        self.run_timer.start(int(delay*1000)); self._update_status(f"Tap sent. Next in {delay:.3f}s")
+RunTab._adjust_min_window_size = _run_tab_adjust_min_window_size
+RunTab._init_splitter_balance = _run_tab_init_splitter_balance
+RunTab._apply_titlebar_theme = _run_tab_apply_titlebar_theme
 
+
+def _run_tab_refresh_statusline(self):
+    run_id = self.logger.run_id if self.logger else "-"
+    cam_idx = self.cam_index.value()
+    fps = int(self.preview_fps or 0)
+    rec = "REC ON" if self.recorder else "REC OFF"
+    port = self.port_edit.currentText().strip() if self.serial.is_open() else "—"
+    serial_state = f"serial:{port}" if self.serial.is_open() else "serial:DISCONNECTED"
+    mode = self.mode.currentText()
+    param = f"P={self.period_sec.value():.2f}s" if mode == "Periodic" else f"λ={self.lambda_rpm.value():.2f}/min"
+    taps = self.taps
+    if self.run_start:
+        elapsed = time.monotonic() - self.run_start
+    else:
+        elapsed = self._last_run_elapsed
+    overall_rate = (taps / elapsed * 60.0) if elapsed > 0 else 0.0
+    recent_rate = self._recent_rate_per_min()
+    recent_str = f"{recent_rate:5.2f}" if recent_rate is not None else "  --"
+    overall_str = f"{overall_rate:5.2f}" if elapsed > 0 else "  --"
+    elapsed_sec = int(round(elapsed))
+    txt = (
+        f"{run_id}  •  cam {cam_idx}/{fps}fps  •  {rec}  •  {serial_state}  •  {mode} {param}"
+        f"  •  taps:{taps}  •  t+{elapsed_sec:6d}s  •  rate10:{recent_str}/min  •  avg:{overall_str}/min"
+    )
+    self.statusline.setText(txt)
+
+
+def _run_tab_update_status(self, msg: str):
+    self.status.setText(msg)
+
+
+RunTab._refresh_statusline = _run_tab_refresh_statusline
+RunTab._update_status = _run_tab_update_status
+
+
+def _run_tab_load_calibration(self) -> dict[str, float]:
+    existing_paths: list[Path] = []
+    for path in self._calibration_paths:
+        try:
+            if path.exists():
+                existing_paths.append(path)
+        except Exception:
+            continue
+    existing_paths.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0.0, reverse=True)
+    for path in existing_paths or self._calibration_paths:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                calibrated: dict[str, float] = {}
+                for key, value in data.items():
+                    try:
+                        calibrated[str(key)] = float(value)
+                    except Exception:
+                        continue
+                self._active_calibration_path = path
+                return calibrated
+        except FileNotFoundError:
+            continue
+        except Exception:
+            continue
+    return {}
+
+
+def _run_tab_save_calibration(self) -> None:
+    for path in self._calibration_paths:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self._period_calibration, f, indent=2)
+            self._active_calibration_path = path
+            return
+        except PermissionError:
+            continue
+        except OSError:
+            continue
+    self._update_status("Calibration save failed (check permissions).")
+
+
+def _run_tab_normalized_port_key(port: str) -> str:
+    if not port:
+        return ""
+    base = port.rstrip('0123456789')
+    return base if base else port
+
+
+def _run_tab_lookup_period_calibration(self, port: str) -> float:
+    if not port:
+        return 1.0
+    if port in self._period_calibration:
+        return float(self._period_calibration[port])
+    key = _run_tab_normalized_port_key(port)
+    if key in self._period_calibration:
+        return float(self._period_calibration[key])
+    if key:
+        for existing_key, value in self._period_calibration.items():
+            if existing_key.startswith(key):
+                return float(value)
+    return 1.0
+
+
+def _run_tab_finalize_period_calibration(self):
+    if self.logger is None:
+        return
+    port = self._active_serial_port.strip()
+    if not port:
+        return
+    if self.mode.currentText() != "Periodic":
+        return
+    if self._first_hw_tap_ms is None or self._last_hw_tap_ms is None:
+        return
+    if self._first_host_tap_monotonic is None or self._last_host_tap_monotonic is None:
+        return
+    board_elapsed_ms = self._last_hw_tap_ms - self._first_hw_tap_ms
+    host_elapsed = self._last_host_tap_monotonic - self._first_host_tap_monotonic
+    if board_elapsed_ms <= 0 or host_elapsed <= 0:
+        return
+    if host_elapsed < 30.0:
+        return
+    host_elapsed_ms = host_elapsed * 1000.0
+    raw_factor = board_elapsed_ms / host_elapsed_ms
+    factor = max(0.95, min(1.05, raw_factor))
+    existing = float(self._period_calibration.get(port, _run_tab_lookup_period_calibration(self, port)))
+    if abs(factor - existing) < 1e-4:
+        return
+    self._period_calibration[port] = factor
+    norm_key = _run_tab_normalized_port_key(port)
+    if norm_key and norm_key != port:
+        self._period_calibration[norm_key] = factor
+    if norm_key:
+        for key in list(self._period_calibration.keys()):
+            if key not in {port, norm_key} and key.startswith(norm_key):
+                self._period_calibration[key] = factor
+    _run_tab_save_calibration(self)
+    if abs(factor - 1.0) < 1e-4:
+        self._update_status(f"Calibration reset for {port} (x{factor:.6f})")
+    else:
+        self._update_status(f"Calibration updated for {port}: x{factor:.6f} (raw {raw_factor:.6f})")
+
+
+def _run_tab_handle_frame(self, frame):
+    if self.cap is None or frame is None:
+        return
+    overlay = frame.copy()
+    self._preview_frame_counter += 1
+    try:
+        text = f"T+{(time.monotonic()-(self.run_start or time.monotonic())):8.3f}s" if self.run_start else "Preview"
+        cv2.putText(overlay, text, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+    except Exception:
+        pass
+    h, w = overlay.shape[:2]
+    qimg = QImage(overlay.data, w, h, 3 * w, QImage.Format_BGR888)
+    pix = QPixmap.fromImage(qimg)
+    self.video_view.set_image(pix)
+    if self._pip_window:
+        self._pip_window.set_pixmap(pix)
+    if self.recorder:
+        self._recorded_frame_counter += 1
+        self.recorder.write(overlay)
+
+
+def _run_tab_start_frame_stream(self):
+    if self.cap is None or self._frame_worker is not None:
+        return
+    interval = int(1000 / max(1, self.preview_fps))
+    self._frame_thread = QThread(self)
+    self._frame_worker = FrameWorker(self.cap, interval)
+    self._frame_worker.moveToThread(self._frame_thread)
+    self._frame_worker.frameReady.connect(self._handle_frame, Qt.QueuedConnection)
+    self._frame_worker.error.connect(self._update_status, Qt.QueuedConnection)
+    self._frame_worker.stopped.connect(self._frame_thread.quit)
+    self._frame_thread.finished.connect(self._cleanup_frame_stream)
+    self._frame_thread.start()
+    QMetaObject.invokeMethod(self._frame_worker, "start", Qt.QueuedConnection)
+
+
+def _run_tab_stop_frame_stream(self):
+    worker = self._frame_worker
+    thread = self._frame_thread
+    if worker:
+        QMetaObject.invokeMethod(worker, "stop", Qt.QueuedConnection)
+    if thread:
+        thread.quit()
+        if not thread.wait(2000):
+            try:
+                thread.terminate()
+            except Exception:
+                pass
+            thread.wait(200)
+    self._cleanup_frame_stream()
+
+
+def _run_tab_cleanup_frame_stream(self):
+    if self._frame_worker is not None:
+        try:
+            self._frame_worker.deleteLater()
+        except Exception:
+            pass
+        self._frame_worker = None
+    if self._frame_thread is not None:
+        try:
+            self._frame_thread.deleteLater()
+        except Exception:
+            pass
+        self._frame_thread = None
+
+
+def _run_tab_on_port_text_changed(self, text: str):
+    text = text.strip()
+    self._active_serial_port = text
+
+
+RunTab._on_port_text_changed = _run_tab_on_port_text_changed
+RunTab._load_calibration = _run_tab_load_calibration
+RunTab._save_calibration = _run_tab_save_calibration
+RunTab._lookup_period_calibration = _run_tab_lookup_period_calibration
+RunTab._finalize_period_calibration = _run_tab_finalize_period_calibration
+RunTab._normalized_port_key = staticmethod(_run_tab_normalized_port_key)
+RunTab._handle_frame = _run_tab_handle_frame
+RunTab._start_frame_stream = _run_tab_start_frame_stream
+RunTab._stop_frame_stream = _run_tab_stop_frame_stream
+RunTab._cleanup_frame_stream = _run_tab_cleanup_frame_stream
+
+
+def _run_tab_shutdown(self):
+    try:
+        self._stop_frame_stream()
+    except Exception:
+        pass
+    if self.cap is not None:
+        try:
+            self.cap.release()
+        except Exception:
+            pass
+        self.cap = None
+    if self._pip_window:
+        try:
+            self._pip_window.close()
+        except Exception:
+            pass
+        self._pip_window = None
+
+
+RunTab.shutdown = _run_tab_shutdown
+
+
+class App(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle(f"NEMESIS {APP_VERSION} — Non-periodic Event Monitoring & Evaluation of Stimulus-Induced States")
+        if LOGO_PATH.exists():
+            self.setWindowIcon(QIcon(str(LOGO_PATH)))
+        self.resize(1260, 800)
+        self.setMinimumSize(900, 540)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.tab_widget = QTabWidget()
+        self.tab_widget.setDocumentMode(True)
+        self.tab_widget.setTabsClosable(False)
+
+        run_tab = RunTab()
+        self.tab_widget.addTab(run_tab, "Run 1")
+
+        dashboard = DashboardTab()
+        self.tab_widget.addTab(dashboard, "Dashboard")
+
+        layout.addWidget(self.tab_widget)
+
+    def keyPressEvent(self, event):
+        widget = self.tab_widget.currentWidget()
+        if isinstance(widget, RunTab):
+            widget.keyPressEvent(event)
+        else:
+            super().keyPressEvent(event)
     def _send_tap(self, mark="scheduled"):
         # Do not log or count taps if serial is disconnected
         if not self.serial.is_open():
@@ -3090,15 +3895,27 @@ class App(QWidget):
         self.taps += 1
         elapsed = t_host - (self.run_start or t_host)
         self._record_tap_interval(t_host)
+        self._last_run_elapsed = elapsed if elapsed > 0 else self._last_run_elapsed
         overall_rate = (self.taps/elapsed*60.0) if elapsed>0 else 0.0
         recent_rate = self._recent_rate_per_min()
-        displayed_rate = recent_rate if recent_rate is not None else overall_rate
+        recent_str = f"{recent_rate:.2f}" if recent_rate is not None else "--"
+        overall_str = f"{overall_rate:.2f}" if elapsed > 0 else "--"
         elapsed_display = int(round(elapsed))
         self.counters.setText(
-            f"Taps: {self.taps} | Elapsed: {elapsed_display} s | Rate10: {displayed_rate:.2f} /min | Overall: {overall_rate:.2f} /min"
+            f"Taps: {self.taps} | Elapsed: {elapsed_display} s | Rate10: {recent_str} /min | Overall: {overall_str} /min"
         )
         if self.logger:
-            self.logger.log_tap(host_time_s=t_host, mode=self.mode.currentText(), mark=mark, stepsize=self.current_stepsize)
+            host_iso = datetime.now(timezone.utc).isoformat()
+            self.logger.log_tap(
+                host_time_s=t_host,
+                mode=self.mode.currentText(),
+                mark=mark,
+                stepsize=self.current_stepsize,
+                host_iso=host_iso,
+                firmware_ms=None,
+                preview_frame_idx=self._preview_frame_counter,
+                recorded_frame_idx=self._recorded_frame_counter,
+            )
         if mark == "scheduled" and self.run_start:
             try:
                 self.live_chart.add_tap(elapsed)
@@ -3110,6 +3927,7 @@ class App(QWidget):
         if self.cap is None or frame is None:
             return
         overlay = frame.copy()
+        self._preview_frame_counter += 1
         try:
             text = f"T+{(time.monotonic()-(self.run_start or time.monotonic())):8.3f}s" if self.run_start else "Preview"
             cv2.putText(overlay, text, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2, cv2.LINE_AA)
@@ -3121,7 +3939,9 @@ class App(QWidget):
         self.video_view.set_image(pix)
         if self._pip_window:
             self._pip_window.set_pixmap(pix)
-        if self.recorder: self.recorder.write(overlay)
+        if self.recorder:
+            self._recorded_frame_counter += 1
+            self.recorder.write(overlay)
 
     def _start_frame_stream(self):
         if self.cap is None or self._frame_worker is not None:
@@ -3177,14 +3997,18 @@ class App(QWidget):
         mode = self.mode.currentText()
         param = f"P={self.period_sec.value():.2f}s" if mode=="Periodic" else f"λ={self.lambda_rpm.value():.2f}/min"
         taps = self.taps
-        elapsed = (time.monotonic() - self.run_start) if self.run_start else 0.0
+        if self.run_start:
+            elapsed = time.monotonic() - self.run_start
+        else:
+            elapsed = self._last_run_elapsed
         overall_rate = (taps/elapsed*60.0) if elapsed>0 else 0.0
         recent_rate = self._recent_rate_per_min()
         recent_str = f"{recent_rate:5.2f}" if recent_rate is not None else "  --"
+        overall_str = f"{overall_rate:5.2f}" if elapsed > 0 else "  --"
         elapsed_sec = int(round(elapsed))
         txt = (
             f"{run_id}  •  cam {cam_idx}/{fps}fps  •  {rec}  •  {serial_state}  •  {mode} {param}"
-            f"  •  taps:{taps}  •  t+{elapsed_sec:6d}s  •  rate10:{recent_str}/min  •  avg:{overall_rate:5.2f}/min"
+            f"  •  taps:{taps}  •  t+{elapsed_sec:6d}s  •  rate10:{recent_str}/min  •  avg:{overall_str}/min"
         )
         self.statusline.setText(txt)
 
@@ -3407,22 +4231,13 @@ class App(QWidget):
                 pass
 
     def closeEvent(self, event):
-        try:
-            self._stop_frame_stream()
-        except Exception:
-            pass
-        if self.cap is not None:
-            try:
-                self.cap.release()
-            except Exception:
-                pass
-            self.cap = None
-        if self._pip_window:
-            try:
-                self._pip_window.close()
-            except Exception:
-                pass
-            self._pip_window = None
+        for index in range(self.tab_widget.count()):
+            widget = self.tab_widget.widget(index)
+            if isinstance(widget, RunTab):
+                try:
+                    widget.shutdown()
+                except Exception:
+                    pass
         super().closeEvent(event)
 
 
