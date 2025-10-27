@@ -4,7 +4,19 @@ from pathlib import Path
 from typing import Optional, Union
 
 CSV_FIELDS = [
-    "run_id","tap_id","tap_uuid","t_host_ms","mode","stepsize","mark","notes","recording_path"
+    "run_id",
+    "tap_id",
+    "tap_uuid",
+    "t_host_ms",
+    "t_host_iso",
+    "t_fw_ms",
+    "mode",
+    "stepsize",
+    "mark",
+    "notes",
+    "frame_preview_idx",
+    "frame_recorded_idx",
+    "recording_path",
 ]
 
 class RunLogger:
@@ -31,8 +43,18 @@ class RunLogger:
         ts = time.strftime("%Y%m%d_%H%M%S")
         return f"run_{ts}"
 
-    def log_tap(self, host_time_s: float, mode: str, mark: str = "scheduled",
-                stepsize: Optional[int] = None, notes: Optional[str] = None):
+    def log_tap(
+        self,
+        host_time_s: float,
+        mode: str,
+        mark: str = "scheduled",
+        stepsize: Optional[int] = None,
+        notes: Optional[str] = None,
+        host_iso: Optional[str] = None,
+        firmware_ms: Optional[float] = None,
+        preview_frame_idx: Optional[int] = None,
+        recorded_frame_idx: Optional[int] = None,
+    ):
         """Append a tap row to taps.csv. host_time_s should be from a consistent clock."""
         self.tap_id += 1
         row = {
@@ -40,10 +62,14 @@ class RunLogger:
             "tap_id": self.tap_id,
             "tap_uuid": str(uuid.uuid4()),
             "t_host_ms": int(round(host_time_s * 1000.0)),
+            "t_host_iso": host_iso or "",
+            "t_fw_ms": f"{firmware_ms:.3f}" if firmware_ms is not None else "",
             "mode": mode,
             "stepsize": stepsize if stepsize is not None else "",
             "mark": mark,
             "notes": notes or "",
+            "frame_preview_idx": "" if preview_frame_idx is None else int(preview_frame_idx),
+            "frame_recorded_idx": "" if recorded_frame_idx is None else int(recorded_frame_idx),
             "recording_path": self._recording_path,
         }
         self._w.writerow(row)

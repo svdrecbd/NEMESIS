@@ -1,22 +1,23 @@
 # app.py — NEMESIS UI (v1.0-rc1, unified feature set)
-import sys, os, time, json, uuid, csv
+import sys, os, time, json, uuid, csv, threading
 from pathlib import Path
 from collections.abc import Sequence
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Any
 
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton, QFileDialog,
     QHBoxLayout, QVBoxLayout, QGridLayout, QComboBox, QSpinBox, QDoubleSpinBox,
     QLineEdit, QMessageBox, QSizePolicy, QListView, QSplitter, QStyleFactory, QFrame, QSpacerItem,
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsProxyWidget, QSplitterHandle, QMenu,
-    QGraphicsOpacityEffect, QTabWidget, QListWidget, QListWidgetItem, QInputDialog
+    QGraphicsOpacityEffect, QTabWidget, QListWidget, QListWidgetItem, QInputDialog, QTabBar, QToolButton,
+    QStyleOptionTab, QStyle, QScrollArea, QStylePainter
 )
 from PySide6.QtCore import (
-    QTimer, Qt, QEvent, QSize, Signal, QObject, QThread, QMetaObject, Slot, QUrl, QPoint,
-    QPropertyAnimation, QEasingCurve, QAbstractAnimation
+    QTimer, Qt, QEvent, QSize, Signal, QObject, Slot, QUrl, QPoint,
+    QPropertyAnimation, QEasingCurve, QAbstractAnimation, QRect
 )
-from PySide6.QtGui import QImage, QPixmap, QFontDatabase, QFont, QIcon, QPainter, QColor, QPen, QDesktopServices
+from PySide6.QtGui import QImage, QPixmap, QFontDatabase, QFont, QIcon, QPainter, QColor, QPen, QDesktopServices, QCursor, QPalette
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MultipleLocator, AutoLocator, NullLocator
@@ -32,7 +33,7 @@ from .core.runlib import RunLibrary, RunSummary
 import shutil
 import cv2
 
-# ---- Assets & Version ----
+# Assets & Version
 # Resolve assets relative to the project root, not the current working directory
 BASE_DIR = Path(__file__).resolve().parent.parent
 ASSETS_DIR = BASE_DIR / "assets"
@@ -41,9 +42,93 @@ LOGO_PATH = ASSETS_DIR / "images/transparent_logo.png"
 FOOTER_LOGO_SCALE = 0.036  # further ~25% shrink keeps footer badge minimal
 APP_VERSION = "1.0-rc1"
 _FONT_FAMILY = None  # set at runtime when font loads
+_APP_ICON: QIcon | None = None
 
 
-# ---- Themes ----
+# Shared Registries
+
+class ResourceRegistry:
+    """Tracks camera and serial ownership across run tabs."""
+
+    def __init__(self):
+        self._camera_owners: dict[int, Any] = {}
+        self._serial_owners: dict[str, Any] = {}
+
+    def claim_camera(self, owner: Any, index: int) -> tuple[bool, Optional[Any]]:
+        idx = int(index)
+        existing = self._camera_owners.get(idx)
+        if existing is not None and existing is not owner:
+            return False, existing
+        self._camera_owners[idx] = owner
+        return True, existing
+
+    def release_camera(self, owner: Any, index: Optional[int] = None) -> None:
+        if index is not None:
+            idx = int(index)
+            if self._camera_owners.get(idx) is owner:
+                self._camera_owners.pop(idx, None)
+            return
+        for idx, current in list(self._camera_owners.items()):
+            if current is owner:
+                self._camera_owners.pop(idx, None)
+
+    def claim_serial(self, owner: Any, port: str) -> tuple[bool, Optional[Any]]:
+        key = port.strip()
+        existing = self._serial_owners.get(key)
+        if existing is not None and existing is not owner:
+            return False, existing
+        self._serial_owners[key] = owner
+        return True, existing
+
+    def release_serial(self, owner: Any, port: Optional[str] = None) -> None:
+        if port is not None:
+            key = port.strip()
+            if self._serial_owners.get(key) is owner:
+                self._serial_owners.pop(key, None)
+            return
+        for key, current in list(self._serial_owners.items()):
+            if current is owner:
+                self._serial_owners.pop(key, None)
+
+    def release_all(self, owner: Any) -> None:
+        self.release_camera(owner)
+        self.release_serial(owner)
+
+
+class LeftAlignTabBar(QTabBar):
+    """Tab bar that left-aligns text and applies consistent padding."""
+
+    def tabSizeHint(self, index: int) -> QSize:
+        size = super().tabSizeHint(index)
+        size.setWidth(max(size.width(), 160))
+        return size
+
+    def paintEvent(self, event):
+        painter = QStylePainter(self)
+        for index in range(self.count()):
+            opt = QStyleOptionTab()
+            self.initStyleOption(opt, index)
+            opt.rect = self.tabRect(index)
+            painter.drawControl(QStyle.CE_TabBarTabShape, opt)
+
+            text_rect = opt.rect.adjusted(12, 0, -12, 0)
+            painter.save()
+            role = QPalette.ButtonText if opt.state & QStyle.State_Selected else QPalette.WindowText
+            painter.setPen(opt.palette.color(role))
+            alignment = Qt.AlignVCenter | Qt.AlignLeft
+            offset = 0
+            if not opt.icon.isNull():
+                icon_size = opt.iconSize if not opt.iconSize.isEmpty() else QSize(16, 16)
+                icon_rect = QRect(text_rect.left(), text_rect.center().y() - icon_size.height() // 2, icon_size.width(), icon_size.height())
+                opt.icon.paint(painter, icon_rect, Qt.AlignLeft | Qt.AlignVCenter,
+                               QIcon.Active if opt.state & QStyle.State_Selected else QIcon.Normal,
+                               QIcon.On if opt.state & QStyle.State_Selected else QIcon.Off)
+                offset = icon_rect.width() + 6
+            painter.drawText(text_rect.adjusted(offset, 0, 0, 0), alignment, opt.text)
+            painter.restore()
+
+
+# Themes
 THEMES: dict[str, dict[str, str]] = {
     "dark": {
         "BG": "#0d0f12",
@@ -126,28 +211,111 @@ def set_active_theme(name: str) -> dict[str, str]:
     _apply_theme_globals(theme)
     return theme
 
+
+def build_app_icon() -> QIcon | None:
+    try:
+        image = QImage(str(LOGO_PATH))
+        if image.isNull():
+            return None
+        width = image.width()
+        height = image.height()
+        min_x, min_y = width, height
+        max_x, max_y = -1, -1
+        for y in range(height):
+            for x in range(width):
+                if image.pixelColor(x, y).alpha() > 10:
+                    if x < min_x:
+                        min_x = x
+                    if x > max_x:
+                        max_x = x
+                    if y < min_y:
+                        min_y = y
+                    if y > max_y:
+                        max_y = y
+        if min_x > max_x or min_y > max_y:
+            cropped = image
+        else:
+            rect = QRect(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
+            cropped = image.copy(rect)
+        size = max(cropped.width(), cropped.height())
+        square = QImage(size, size, QImage.Format_ARGB32_Premultiplied)
+        square.fill(Qt.transparent)
+        painter = QPainter(square)
+        try:
+            painter.drawImage(
+                (size - cropped.width()) // 2,
+                (size - cropped.height()) // 2,
+                cropped
+            )
+        finally:
+            painter.end()
+        base_pix = QPixmap.fromImage(square)
+        icon = QIcon()
+        for target in (16, 32, 64, 128, 256):
+            icon.addPixmap(base_pix.scaled(target, target, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        return icon
+    except Exception:
+        return None
+
 def build_stylesheet(font_family: str | None, scale: float = 1.0) -> str:
     s = max(0.7, min(scale, 2.0))
     family_rule = f"font-family: '{font_family}';" if font_family else ""
     font_pt = int(round(11 * s))
     status_pt = int(round(10 * s))
-    btn_py = int(round(6 * s)); btn_px = int(round(10 * s)); rad = int(round(6 * s))
+    btn_py = int(round(6 * s)); btn_px = int(round(10 * s))
     inp_py = int(round(4 * s)); inp_px = int(round(6 * s))
+    tab_py = int(round(6 * s))
+    tab_left_px = int(round(12 * s))
+    tab_right_px = int(round(24 * s))
+    tab_min_w = int(round(120 * s))
     return f"""
 * {{ background: {BG}; color: {TEXT}; font-size: {font_pt}pt; {family_rule} }}
 QWidget {{ background: {BG}; }}
 QLabel#StatusLine {{ color: {TEXT}; font-size: {status_pt}pt; }}
-QPushButton {{ background: {MID}; border:1px solid {BUTTON_BORDER}; padding:{btn_py}px {btn_px}px; border-radius:{rad}px; }}
+QPushButton {{ background: {MID}; border:1px solid {BUTTON_BORDER}; padding:{btn_py}px {btn_px}px; border-radius:0px; }}
 QPushButton:hover {{ border-color: {ACCENT}; }}
 QPushButton:checked {{ background:{BUTTON_CHECKED_BG}; border-color:{ACCENT}; }}
-QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{ background:{MID}; border:1px solid {INPUT_BORDER}; padding:{inp_py}px {inp_px}px; border-radius:{rad}px; }}
+QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{ background:{MID}; border:1px solid {INPUT_BORDER}; padding:{inp_py}px {inp_px}px; border-radius:0px; }}
 /* Disabled state — strongly greyed out for clarity */
 QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {{
-    background: {DISABLED_BG};        /* darker or lighter variant */
-    color: {DISABLED_TEXT};           /* dimmer text */
-    border: 1px solid {DISABLED_BORDER};  /* subdued border */
+    background: {DISABLED_BG};
+    color: {DISABLED_TEXT};
+    border: 1px solid {DISABLED_BORDER};
 }}
 QLabel:disabled {{ color: {DISABLED_TEXT}; }}
+QTabWidget::pane {{ border: 0px; }}
+QTabBar::tab {{
+    padding: {tab_py}px {tab_right_px}px {tab_py}px {tab_left_px}px;
+    margin: 2px;
+    border: 0px;
+    border-radius: 0px;
+    min-width: {tab_min_w}px;
+    background: {BG};
+    color: {TEXT};
+    text-align: left;
+}}
+QTabBar::tab:selected {{
+    background: {MID};
+    color: {TEXT};
+    border-bottom: 2px solid {ACCENT};
+    text-align: left;
+}}
+QTabBar::tab:!selected {{
+    background: {BG};
+    border-bottom: 2px solid transparent;
+    text-align: left;
+}}
+QTabBar::close-button {{
+    border: none;
+    background: transparent;
+    margin: 0px;
+    padding: 0px;
+}}
+QTabBar::close-button:hover {{
+    background: {ACCENT};
+    color: {BG};
+    border-radius: 0px;
+}}
 """
 
 def _apply_global_font(app: QApplication):
@@ -288,7 +456,7 @@ class LiveChart:
         )
         # Compact layout and tighter suptitle position to reduce top padding
         try:
-            self.fig.subplots_adjust(top=0.86, bottom=0.18, left=0.10, right=0.98, hspace=0.08)
+            self.fig.subplots_adjust(top=0.82, bottom=0.18, left=0.10, right=0.98, hspace=0.12)
         except Exception:
             pass
         self.canvas = FigureCanvas(self.fig)
@@ -301,12 +469,12 @@ class LiveChart:
             pass
         self.times_sec: list[float] = []
         self._time_unit: str = "minutes"
-        self._time_factor: float = 60.0
+        self._last_max_elapsed_sec: float = 0.0
         self._init_axes()
 
     def _init_axes(self):
         text_color = self.color("TEXT")
-        self.fig.suptitle("Stentor Habituation to Stimuli", fontsize=10, color=text_color, y=0.96)
+        self.fig.suptitle("Stentor Habituation to Stimuli", fontsize=10, color=text_color, y=0.98)
         try:
             self.fig.patch.set_alpha(0.0)
             self.fig.patch.set_facecolor('none')
@@ -410,7 +578,12 @@ class LiveChart:
         ax_top.set_xlim(0, max_unit_val)
         ax_bot.set_xlim(0, max_unit_val)
         self._time_unit = unit
-        self._time_factor = factor
+        self._last_max_elapsed_sec = max_elapsed_sec
+        try:
+            self.fig.subplots_adjust(top=0.82, bottom=0.18, left=0.10, right=0.98, hspace=0.12)
+            self.fig.suptitle("Stentor Habituation to Stimuli", fontsize=10, color=text_color, y=0.98)
+        except Exception:
+            pass
 
     def color(self, key: str) -> str:
         if key in self.theme:
@@ -420,10 +593,11 @@ class LiveChart:
     def set_theme(self, theme: dict[str, str]):
         self.theme = theme
         apply_matplotlib_theme(self.font_family, theme)
-        self._init_axes()
         if self.times_sec:
             self._redraw()
-
+        else:
+            self._configure_axes(self._time_unit, self._last_max_elapsed_sec)
+            self.canvas.draw_idle()
 
 class ZoomView(QGraphicsView):
     firstFrame = Signal()
@@ -460,10 +634,10 @@ class ZoomView(QGraphicsView):
         )
         self._scrollbar_qss = (
             "QScrollBar:vertical { width: 6px; background: transparent; margin: 2px; }\n"
-            f"QScrollBar::handle:vertical {{ background: {SCROLLBAR}; border-radius: 3px; }}\n"
+            f"QScrollBar::handle:vertical {{ background: {SCROLLBAR}; border-radius: 0px; }}\n"
             "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; background: transparent; }\n"
             "QScrollBar:horizontal { height: 6px; background: transparent; margin: 2px; }\n"
-            f"QScrollBar::handle:horizontal {{ background: {SCROLLBAR}; border-radius: 3px; }}\n"
+            f"QScrollBar::handle:horizontal {{ background: {SCROLLBAR}; border-radius: 0px; }}\n"
             "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; background: transparent; }\n"
         )
         try:
@@ -478,6 +652,8 @@ class ZoomView(QGraphicsView):
         self._min_zoom = 0.2
         self._max_zoom = 8.0
         self._emitted_first = False
+        self._last_pix_size = QSize()
+        self._pending_refit = False
         self._sb_timer = QTimer(self)
         self._sb_timer.setSingleShot(True)
         self._sb_timer.timeout.connect(self._hide_scrollbars)
@@ -490,10 +666,10 @@ class ZoomView(QGraphicsView):
     def _build_scrollbar_qss(self, color: str) -> str:
         return (
             "QScrollBar:vertical { width: 6px; background: transparent; margin: 2px; }\n"
-            f"QScrollBar::handle:vertical {{ background: {color}; border-radius: 3px; }}\n"
+            f"QScrollBar::handle:vertical {{ background: {color}; border-radius: 0px; }}\n"
             "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; background: transparent; }\n"
             "QScrollBar:horizontal { height: 6px; background: transparent; margin: 2px; }\n"
-            f"QScrollBar::handle:horizontal {{ background: {color}; border-radius: 3px; }}\n"
+            f"QScrollBar::handle:horizontal {{ background: {color}; border-radius: 0px; }}\n"
             "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; background: transparent; }\n"
         )
 
@@ -515,14 +691,30 @@ class ZoomView(QGraphicsView):
             pass
 
     def set_image(self, pix: QPixmap):
+        has_pix = hasattr(pix, "isNull") and not pix.isNull()
+        size_changed = False
+        if has_pix:
+            new_size = pix.size()
+            if new_size != self._last_pix_size:
+                self._last_pix_size = QSize(new_size)
+                size_changed = True
+        else:
+            self._last_pix_size = QSize()
         self._pix.setPixmap(pix)
-        if not self._has_image:
-            self._has_image = True
-            try:
-                self.fitInView(self._pix, Qt.KeepAspectRatio)
-                self._zoom = 1.0
-            except Exception:
-                pass
+        if not has_pix:
+            self._has_image = False
+            return
+        needs_refit = False
+        if self._pending_refit:
+            needs_refit = True
+        elif not self._has_image:
+            needs_refit = True
+        elif size_changed and abs(self._zoom - 1.0) < 1e-3:
+            needs_refit = True
+        self._has_image = True
+        if needs_refit:
+            self._refit_view()
+        self._pending_refit = False
         # Emit firstFrame once, on the first real pixmap
         if not self._emitted_first and hasattr(pix, 'isNull') and not pix.isNull():
             self._emitted_first = True
@@ -541,8 +733,20 @@ class ZoomView(QGraphicsView):
 
     def reset_first_frame(self):
         """Allow the next real pixmap to emit firstFrame again and refit view."""
+        current = self._pix.pixmap()
+        has_pix = hasattr(current, "isNull") and not current.isNull() if current is not None else False
         self._emitted_first = False
-        self._has_image = False
+        self._pending_refit = True
+        self._last_pix_size = QSize()
+        if has_pix:
+            self._has_image = True
+        else:
+            self._has_image = False
+            try:
+                self.resetTransform()
+            except Exception:
+                pass
+            self._zoom = 1.0
 
     def _zoom_by(self, factor: float):
         new_zoom = max(self._min_zoom, min(self._zoom * factor, self._max_zoom))
@@ -620,10 +824,14 @@ class ZoomView(QGraphicsView):
         super().resizeEvent(e)
         # Keep initial fit; if user has zoomed, don't override
         if self._has_image and abs(self._zoom - 1.0) < 1e-3:
-            try:
-                self.fitInView(self._pix, Qt.KeepAspectRatio)
-            except Exception:
-                pass
+            self._refit_view()
+
+    def _refit_view(self):
+        try:
+            self.fitInView(self._pix, Qt.KeepAspectRatio)
+            self._zoom = 1.0
+        except Exception:
+            pass
     def drawForeground(self, painter: QPainter, rect):
         super().drawForeground(painter, rect)
         if not self._has_image:
@@ -1044,44 +1252,50 @@ class FrameWorker(QObject):
     def __init__(self, capture: video.VideoCapture, interval_ms: int = 33):
         super().__init__()
         self._capture = capture
-        self._interval_ms = max(5, int(interval_ms))
-        self._timer: QTimer | None = None
+        self._interval_s = max(0.005, float(interval_ms) / 1000.0)
         self._running = False
+        self._thread: threading.Thread | None = None
+
+    def _loop(self):
+        interval = self._interval_s
+        next_tick = time.perf_counter()
+        try:
+            while self._running:
+                try:
+                    ok, frame = self._capture.read()
+                except Exception as exc:
+                    self.error.emit(f"Camera error: {exc}")
+                    break
+                if ok and frame is not None:
+                    self.frameReady.emit(frame)
+                if interval > 0:
+                    next_tick += interval
+                    sleep_for = next_tick - time.perf_counter()
+                    if sleep_for > 0:
+                        time.sleep(sleep_for)
+                    else:
+                        next_tick = time.perf_counter()
+        finally:
+            self._running = False
+            self.stopped.emit()
 
     @Slot()
     def start(self):
         if self._running:
             return
         self._running = True
-        self._timer = QTimer(self)
-        self._timer.setTimerType(Qt.PreciseTimer)
-        self._timer.setInterval(self._interval_ms)
-        self._timer.timeout.connect(self._poll_frame)
-        self._timer.start()
+        self._thread = threading.Thread(target=self._loop, name="FrameWorkerLoop", daemon=True)
+        self._thread.start()
 
     @Slot()
     def stop(self):
         if not self._running:
             return
         self._running = False
-        if self._timer:
-            self._timer.stop()
-            self._timer.deleteLater()
-            self._timer = None
-        self.stopped.emit()
-
-    @Slot()
-    def _poll_frame(self):
-        if not self._running:
-            return
-        try:
-            ok, frame = self._capture.read()
-        except Exception as exc:
-            self.error.emit(f"Camera error: {exc}")
-            return
-        if not ok or frame is None:
-            return
-        self.frameReady.emit(frame)
+        thread = self._thread
+        if thread and thread.is_alive() and threading.current_thread() is not thread:
+            thread.join(timeout=0.5)
+        self._thread = None
 
 
 class AspectRatioContainer(QWidget):
@@ -1180,6 +1394,7 @@ class AppZoomView(QGraphicsView):
         self._proxy: QGraphicsProxyWidget | None = None
         self._content: QWidget | None = None
         self._base_size: QSize = QSize(0, 0)
+        self._bg_color = bg_color
         # Visuals
         try:
             self.setBackgroundBrush(QColor(bg_color))
@@ -1207,10 +1422,11 @@ class AppZoomView(QGraphicsView):
         # State
         self._scale = 1.0
         self._min_scale = 1.0
-        self._max_scale = 1.8
+        self._max_scale = 1.35
         self._sb_timer = QTimer(self)
         self._sb_timer.setSingleShot(True)
         self._sb_timer.timeout.connect(self._hide_scrollbars)
+        self._content_fits = True
         try:
             self.grabGesture(Qt.PinchGesture)
         except Exception:
@@ -1219,10 +1435,10 @@ class AppZoomView(QGraphicsView):
     def _build_scrollbar_style(self, color: str) -> str:
         return (
             "QScrollBar:vertical { width: 6px; background: transparent; margin: 2px; }\n"
-            f"QScrollBar::handle:vertical {{ background: {color}; border-radius: 3px; }}\n"
+            f"QScrollBar::handle:vertical {{ background: {color}; border-radius: 0px; }}\n"
             "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; background: transparent; }\n"
             "QScrollBar:horizontal { height: 6px; background: transparent; margin: 2px; }\n"
-            f"QScrollBar::handle:horizontal {{ background: {color}; border-radius: 3px; }}\n"
+            f"QScrollBar::handle:horizontal {{ background: {color}; border-radius: 0px; }}\n"
             "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; background: transparent; }\n"
         )
 
@@ -1253,7 +1469,7 @@ class AppZoomView(QGraphicsView):
         if not hint.isValid() or hint.width() <= 0 or hint.height() <= 0:
             hint = w.minimumSizeHint()
         if not hint.isValid() or hint.width() <= 0 or hint.height() <= 0:
-            hint = QSize(900, 540)
+            hint = QSize(1200, 720)
         self._base_size = hint
         self._apply_geometry_to_proxy()
         self._update_interaction_state()
@@ -1263,7 +1479,10 @@ class AppZoomView(QGraphicsView):
         self._scale = s
         self.resetTransform()
         self.scale(s, s)
-        self._show_scrollbars_temporarily()
+        if s > 1.0 + 1e-3:
+            self._show_scrollbars_temporarily()
+        else:
+            self._hide_scrollbars()
         self._update_interaction_state()
 
     def zoom_by(self, factor: float):
@@ -1299,33 +1518,43 @@ class AppZoomView(QGraphicsView):
     def wheelEvent(self, e):
         # Two-finger scroll pans; reveal scrollbars temporarily
         try:
-            if self._scale <= 1.0 + 1e-3:
-                # At base scale, don't allow panning at all
-                e.accept()
-                return
+            h = self.horizontalScrollBar(); v = self.verticalScrollBar()
+            has_scroll_range = ((h and h.maximum() > 0) or (v and v.maximum() > 0))
+            if self._scale <= 1.0 + 1e-3 and not has_scroll_range:
+                return super().wheelEvent(e)
             pd = e.pixelDelta(); ad = e.angleDelta()
             dx = pd.x() if not pd.isNull() else ad.x()
             dy = pd.y() if not pd.isNull() else ad.y()
-            h = self.horizontalScrollBar(); v = self.verticalScrollBar()
-            if h: h.setValue(h.value() - dx)
-            if v: v.setValue(v.value() - dy)
-            e.accept(); self._show_scrollbars_temporarily(); return
+            if h:
+                h.setValue(h.value() - dx)
+            if v:
+                v.setValue(v.value() - dy)
+            e.accept()
+            self._show_scrollbars_temporarily()
+            return
         except Exception:
             pass
         return super().wheelEvent(e)
 
     def _show_scrollbars_temporarily(self):
         try:
-            if self.horizontalScrollBar(): self.horizontalScrollBar().setVisible(True)
-            if self.verticalScrollBar(): self.verticalScrollBar().setVisible(True)
-            self._sb_timer.start(700)
+            if self.horizontalScrollBar():
+                self.horizontalScrollBar().setVisible(True)
+            if self.verticalScrollBar():
+                self.verticalScrollBar().setVisible(True)
+            if getattr(self, "_content_fits", True):
+                self._sb_timer.start(700)
         except Exception:
             pass
 
     def _hide_scrollbars(self):
         try:
-            if self.horizontalScrollBar(): self.horizontalScrollBar().setVisible(False)
-            if self.verticalScrollBar(): self.verticalScrollBar().setVisible(False)
+            if not getattr(self, "_content_fits", True):
+                return
+            if self.horizontalScrollBar():
+                self.horizontalScrollBar().setVisible(False)
+            if self.verticalScrollBar():
+                self.verticalScrollBar().setVisible(False)
         except Exception:
             pass
 
@@ -1362,18 +1591,22 @@ class AppZoomView(QGraphicsView):
             sr = self._scene.sceneRect()
             fits_w = sr.width() <= vp.width() + 0.5
             fits_h = sr.height() <= vp.height() + 0.5
-            if self._scale <= 1.0 + 1e-3:
-                # Disable panning entirely at base scale
+            content_fits = fits_w and fits_h
+            self._content_fits = content_fits
+            if self._scale <= 1.0 + 1e-3 and content_fits:
                 self.setDragMode(QGraphicsView.NoDrag)
-                if self.horizontalScrollBar(): self.horizontalScrollBar().setVisible(False)
-                if self.verticalScrollBar(): self.verticalScrollBar().setVisible(False)
-                # Clamp scroll ranges so two-finger scroll cannot move content
-                if self.horizontalScrollBar(): self.horizontalScrollBar().setRange(0, 0)
-                if self.verticalScrollBar(): self.verticalScrollBar().setRange(0, 0)
+                if self.horizontalScrollBar():
+                    self.horizontalScrollBar().setRange(0, 0)
+                    self.horizontalScrollBar().setVisible(False)
+                if self.verticalScrollBar():
+                    self.verticalScrollBar().setRange(0, 0)
+                    self.verticalScrollBar().setVisible(False)
             else:
                 self.setDragMode(QGraphicsView.ScrollHandDrag)
-                # Let Qt manage ranges normally when zoomed in or content exceeds viewport
-                # Ranges will be reset by Qt on sceneRect/resize events
+                if self.horizontalScrollBar():
+                    self.horizontalScrollBar().setVisible(True)
+                if self.verticalScrollBar():
+                    self.verticalScrollBar().setVisible(True)
         except Exception:
             pass
 
@@ -1427,6 +1660,9 @@ class PinnedPreviewWindow(QWidget):
 
 
 class RunTab(QWidget):
+    runCompleted = Signal(str, str)
+    themeChanged = Signal(str)
+
     class StyledCombo(QComboBox):
         def __init__(self, popup_qss: str = "", *args, **kwargs):
             super().__init__(*args, **kwargs)
@@ -1592,6 +1828,11 @@ class RunTab(QWidget):
                 pane.setPalette(pal)
             except Exception:
                 pass
+        if getattr(self, "_right_scroll", None):
+            try:
+                self._right_scroll.setStyleSheet(f"QScrollArea {{ background: {BG}; border: 0px; }}")
+            except Exception:
+                pass
         if getattr(self, "_pip_window", None):
             try:
                 self._pip_window.set_theme(theme)
@@ -1624,8 +1865,8 @@ class RunTab(QWidget):
             except Exception:
                 pass
 
-    def _apply_theme(self, name: str):
-        if name == self._theme_name:
+    def _apply_theme(self, name: str, *, broadcast: bool = True, force: bool = False):
+        if not force and name == self._theme_name:
             return
         old_bg = None
         try:
@@ -1633,22 +1874,34 @@ class RunTab(QWidget):
                 old_bg = self._theme.get("BG", BG)
         except Exception:
             old_bg = BG
-        theme = set_active_theme(name)
+        if broadcast:
+            theme_map = set_active_theme(name)
+        else:
+            theme_map = THEMES.get(name, THEMES.get(DEFAULT_THEME_NAME, active_theme()))
         self._theme_name = name
-        self._theme = dict(theme)
-        app = QApplication.instance()
-        if app is not None:
-            try:
-                app.setStyleSheet(build_stylesheet(_FONT_FAMILY, self.ui_scale))
-            except Exception:
-                pass
+        self._theme = dict(theme_map)
+        if broadcast:
+            app = QApplication.instance()
+            if app is not None:
+                try:
+                    app.setStyleSheet(build_stylesheet(_FONT_FAMILY, self.ui_scale))
+                except Exception:
+                    pass
         self._refresh_combo_styles()
         self._apply_theme_to_widgets()
         self._refresh_branding_styles()
         self._refresh_recording_indicator()
         self._sync_logo_menu_checks()
-        if old_bg:
+        if broadcast and old_bg:
             self._start_theme_transition(old_bg)
+        if broadcast:
+            try:
+                self.themeChanged.emit(name)
+            except Exception:
+                pass
+
+    def apply_theme_external(self, name: str):
+        self._apply_theme(name, broadcast=False, force=True)
 
     def _set_mirror_mode(self, enabled: bool):
         enabled = bool(enabled)
@@ -1765,8 +2018,9 @@ class RunTab(QWidget):
         self._theme_overlay = overlay
         self._theme_overlay_anim = anim
 
-    def __init__(self):
+    def __init__(self, resource_registry: ResourceRegistry | None = None):
         super().__init__()
+        self._resource_registry = resource_registry
         self.ui_scale = 1.0
         self._theme_name = _ACTIVE_THEME_NAME
         self._theme = dict(active_theme())
@@ -1774,7 +2028,7 @@ class RunTab(QWidget):
         self._theme_overlay: QWidget | None = None
         self._theme_overlay_anim: QPropertyAnimation | None = None
 
-        # ---------- Top dense status line + inline logo ----------
+        # Top dense status line + inline logo
         header_row = QHBoxLayout()
         self.statusline = QLabel("—")
         self.statusline.setObjectName("StatusLine")
@@ -1783,7 +2037,7 @@ class RunTab(QWidget):
         self.statusline.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         header_row.addWidget(self.statusline, 1)
 
-        # ---------- Video preview (zoomable/pannable) ----------
+        # Video preview (zoomable/pannable)
         self.video_view = ZoomView(bg_color=self._theme.get("BG", BG))
         try:
             self.video_view.firstFrame.connect(self._on_preview_first_frame)
@@ -1799,7 +2053,7 @@ class RunTab(QWidget):
         self.video_view.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.video_view.setMinimumSize(480, 270)
 
-        # ---------- Serial controls ----------
+        # Serial controls
         self.port_edit = QComboBox()
         self.port_edit.setEditable(True)
         self.port_edit.setInsertPolicy(QComboBox.NoInsert)
@@ -1816,17 +2070,17 @@ class RunTab(QWidget):
         self.jog_up_btn.setToolTip("Raise tapper arm (half step)")
         self.jog_down_btn.setToolTip("Lower tapper arm (half step)")
 
-        # ---------- Camera controls ----------
+        # Camera controls
         self.cam_index = QSpinBox(); self.cam_index.setRange(0, 8); self.cam_index.setValue(0)
         self.cam_btn = QPushButton("Open Camera")
 
-        # ---------- Recording controls (independent) ----------
+        # Recording controls (independent)
         self.rec_start_btn = QPushButton("Start Recording")
         self.rec_stop_btn  = QPushButton("Stop Recording")
         self.rec_indicator = QLabel("● REC OFF")
         self._recording_active = False
 
-        # ---------- Scheduler controls ----------
+        # Scheduler controls
         popup_qss = self._build_combo_popup_qss()
         self.mode = RunTab.StyledCombo(popup_qss=popup_qss); self.mode.addItems(["Periodic", "Poisson"])
         # Stabilize width and style popup to avoid clipping
@@ -2023,7 +2277,7 @@ class RunTab(QWidget):
         self.logo_menu = self._build_logo_menu()
         serial_status_row.addStretch(1)  # keep status text left-aligned
 
-        # ---------- Layout ----------
+        # Layout
         # Left pane: 16:9-bounded preview, then chart; keep both anchored to top
         left = QVBoxLayout(); left.setContentsMargins(0, 0, 0, 0); left.setSpacing(8)
         self.video_area = AspectRatioContainer(self.video_view, 16, 9)
@@ -2175,7 +2429,8 @@ class RunTab(QWidget):
             leftw.setMinimumWidth(max(360, self.video_area.minimumWidth()))
         except Exception:
             pass
-        rightw = QWidget(); rightw.setLayout(right)
+        rightw = QWidget()
+        rightw.setLayout(right)
         self._right_layout = right
         self._right_widget = rightw
         rightw.setAutoFillBackground(True)
@@ -2184,9 +2439,16 @@ class RunTab(QWidget):
             rightw.setMinimumWidth(360)
         except Exception:
             pass
+        right_scroll = QScrollArea()
+        right_scroll.setWidget(rightw)
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QFrame.NoFrame)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        right_scroll.setMinimumWidth(380)
+        self._right_scroll = right_scroll
         splitter = GuideSplitter(Qt.Horizontal, snap_targets=(0.25, 0.5, 0.75), theme=self._theme)
         splitter.addWidget(leftw)
-        splitter.addWidget(rightw)
+        splitter.addWidget(right_scroll)
         splitter.setChildrenCollapsible(False)
         try:
             splitter.setCollapsible(0, False)
@@ -2208,7 +2470,11 @@ class RunTab(QWidget):
         self.splitter = splitter
 
         # Wrap entire UI content in a zoomable view for browser-like zoom
-        contentw = QWidget(); content_layout = QHBoxLayout(contentw); content_layout.setContentsMargins(0,0,0,0); content_layout.addWidget(splitter)
+        contentw = QWidget()
+        content_layout = QHBoxLayout(contentw)
+        content_layout.setContentsMargins(0,0,0,0)
+        content_layout.addWidget(splitter)
+        contentw.setMinimumSize(1280, 780)
         self.app_view = AppZoomView(bg_color=self._theme.get("BG", BG))
         self.app_view.set_content(contentw)
         # Enforce a minimum window size that encompasses the full UI content
@@ -2216,8 +2482,8 @@ class RunTab(QWidget):
             min_hint = contentw.minimumSizeHint()
             if not min_hint.isValid() or min_hint.width() <= 0:
                 min_hint = contentw.sizeHint()
-            min_w = max(900, min_hint.width())
-            min_h = max(540, min_hint.height())
+            min_w = max(1280, min_hint.width())
+            min_h = max(780, min_hint.height())
             self.setMinimumSize(min_w, min_h)
             # Ensure initial window isn't smaller than minimum content
             self.resize(max(self.width(), min_w), max(self.height(), min_h))
@@ -2235,10 +2501,9 @@ class RunTab(QWidget):
         self._sync_logo_menu_checks()
         self._update_mirror_layout()
 
-        # ---------- State ----------
+        # State
         self.cap = None
         self.recorder = None
-        self._frame_thread: QThread | None = None
         self._frame_worker: FrameWorker | None = None
         self.run_timer   = QTimer(self); self.run_timer.setSingleShot(True); self.run_timer.timeout.connect(self._on_tap_due)
         self.session = RunSession()
@@ -2251,7 +2516,7 @@ class RunTab(QWidget):
         self.serial_timer.setInterval(50)
         self.serial_timer.timeout.connect(self._drain_serial_queue)
 
-        # ---------- Signals ----------
+        # Signals
         self.cam_btn.clicked.connect(self._open_camera)
         self.serial_btn.clicked.connect(self._toggle_serial)
         self.enable_btn.clicked.connect(lambda: self._send_serial_char('e', "Enable motor"))
@@ -2286,7 +2551,6 @@ class RunTab(QWidget):
         self.preview_fps = 30
         self.current_stepsize = 4
         self._pip_window: PinnedPreviewWindow | None = None
-        self._hardware_config_message = ""
         self._calibration_paths: tuple[Path, ...] = (
             Path.home() / ".nemesis" / "calibration.json",
             BASE_DIR / "runs" / "calibration.json",
@@ -2296,7 +2560,7 @@ class RunTab(QWidget):
         if self._active_calibration_path is None:
             self._active_calibration_path = self._calibration_paths[0]
 
-    # ---- Session property shortcuts (for compatibility during refactor) ----
+    # Session property shortcuts (for compatibility during refactor)
     @property
     def scheduler(self):
         return self.session.scheduler
@@ -2417,6 +2681,26 @@ class RunTab(QWidget):
     def _active_serial_port(self, value):
         self.session.active_serial_port = value
 
+    @property
+    def _hardware_config_message(self):
+        return self.session.hardware_config_message
+
+    @_hardware_config_message.setter
+    def _hardware_config_message(self, value: str):
+        self.session.hardware_config_message = value
+
+    @property
+    def _preview_size(self) -> tuple[int, int]:
+        return self.session.preview_size
+
+    @_preview_size.setter
+    def _preview_size(self, value: tuple[int, int]):
+        try:
+            w, h = value
+            self.session.preview_size = (int(w), int(h))
+        except Exception:
+            self.session.preview_size = (0, 0)
+
     def _reset_tap_history(self) -> None:
         self.session.reset_tap_history()
 
@@ -2457,13 +2741,15 @@ class RunTab(QWidget):
         spacers = getattr(self, "_section_spacers", None)
         layouts = getattr(self, "_section_layouts", None)
         right_widget = getattr(self, "_right_widget", None)
+        right_scroll = getattr(self, "_right_scroll", None)
         if not spacers or not layouts or right_widget is None:
             return
         gaps = len(spacers)
         if gaps == 0:
             return
         try:
-            available = right_widget.height() - sum(layout.sizeHint().height() for layout in layouts)
+            viewport_h = right_scroll.viewport().height() if right_scroll else right_widget.height()
+            available = viewport_h - sum(layout.sizeHint().height() for layout in layouts)
         except Exception:
             available = 0
         available = max(0, available)
@@ -2482,7 +2768,7 @@ class RunTab(QWidget):
             pass
 
     def _build_logo_menu(self) -> QMenu:
-        menu = QMenu(self)
+        menu = QMenu()
         menu.setObjectName("logoQuickActions")
         self._action_light_mode = menu.addAction("Light Mode")
         self._action_light_mode.setCheckable(True)
@@ -2507,8 +2793,7 @@ class RunTab(QWidget):
             return
         if not hasattr(self, "logo_menu") or self.logo_menu is None:
             return
-        global_pos = self.logo_footer.mapToGlobal(QPoint(0, self.logo_footer.height()))
-        self.logo_menu.exec(global_pos)
+        self.logo_menu.popup(QCursor.pos())
 
     def _on_light_mode_triggered(self, checked: bool):
         target = "light" if checked else "dark"
@@ -2562,7 +2847,7 @@ class RunTab(QWidget):
             pass
         return super().eventFilter(obj, ev)
 
-    # ---------- Pro Mode ----------
+    # Pro Mode
     def _toggle_pro_mode(self, on: bool):
         self.pro_mode = on
         self.pro_btn.setText(f"Pro Mode: {'ON' if on else 'OFF'}")
@@ -2626,7 +2911,7 @@ class RunTab(QWidget):
             self.lambda_rpm.setValue(self.lambda_rpm.value()+0.5); return
         return super().keyPressEvent(event)
 
-    # ---------- Stepsize ----------
+    # Stepsize
     def _on_stepsize_changed(self, text: str):
         # Accept labels like "4 (1/8 Step)" by parsing the leading integer
         try:
@@ -2677,7 +2962,7 @@ class RunTab(QWidget):
     def _recent_rate_per_min(self) -> float | None:
         return self.session.recent_rate_per_min()
 
-    # ---------- Hardware serial processing ----------
+    # Hardware serial processing
 
     def _drain_serial_queue(self):
         if not self.serial.is_open():
@@ -2987,7 +3272,7 @@ class RunTab(QWidget):
         self._record_serial_command(payload, note)
         return True
 
-    # ---------- Camera ----------
+    # Camera
     def _on_preview_first_frame(self):
         try:
             self.video_area.set_border_visible(True)
@@ -3001,13 +3286,26 @@ class RunTab(QWidget):
 
     def _open_camera(self):
         idx = self.cam_index.value()
+        registry = getattr(self, "_resource_registry", None)
         if self.cap is None:
+            if registry is not None:
+                ok, _owner = registry.claim_camera(self, idx)
+                if not ok:
+                    self._update_status(f"Camera {idx} already in use on another tab.")
+                    return
             self.cap = video.VideoCapture(idx)
             if not self.cap.open():
-                self._update_status("Failed to open camera."); self.cap = None; return
+                self._update_status("Failed to open camera.")
+                self.cap = None
+                if registry is not None:
+                    registry.release_camera(self, idx)
+                self.session.camera_index = None
+                return
+            self.session.camera_index = idx
             try:
                 w, h = self.cap.get_size()
                 if w and h:
+                    self._preview_size = (w, h)
                     self.video_area.set_aspect(w, h)
                     self.video_area.update()
                     if self._pip_window:
@@ -3026,22 +3324,42 @@ class RunTab(QWidget):
             self._stop_recording()
             self._stop_frame_stream()
             self.cap.release(); self.cap = None
-            # Reset to 16:9 when closed
+            active_idx = self.session.camera_index if self.session.camera_index is not None else idx
+            if registry is not None:
+                registry.release_camera(self, active_idx)
+            self.session.camera_index = None
             try:
-                self.video_area.set_aspect(16, 9)
                 self.video_area.set_border_visible(True)
                 self.video_view.reset_first_frame()
                 self.video_area.update()
                 if self._pip_window:
-                    self._pip_window.set_aspect(16, 9)
                     self._pip_window.set_border_visible(True)
                     self._pip_window.reset_first_frame()
             except Exception:
                 pass
             self.cam_btn.setText("Open Camera"); self._update_status("Camera closed.")
 
-    # ---------- Serial ----------
+    def _maybe_update_preview_aspect(self, width: int, height: int):
+        if width <= 0 or height <= 0:
+            return
+        prev_w, prev_h = self._preview_size
+        if prev_w == width and prev_h == height:
+            return
+        self._preview_size = (width, height)
+        try:
+            self.video_area.set_aspect(width, height)
+            self.video_area.update()
+        except Exception:
+            pass
+        if self._pip_window:
+            try:
+                self._pip_window.set_aspect(width, height)
+            except Exception:
+                pass
+
+    # Serial
     def _toggle_serial(self):
+        registry = getattr(self, "_resource_registry", None)
         if not self.serial.is_open():
             port = self.port_edit.currentText().strip()
             if not port:
@@ -3058,29 +3376,41 @@ class RunTab(QWidget):
             if not port:
                 self._update_status("Enter a serial port first.")
                 return
+            if registry is not None:
+                ok, _owner = registry.claim_serial(self, port)
+                if not ok:
+                    self._update_status(f"Serial port {port} already in use on another tab.")
+                    return
             try:
                 self.serial.open(port, baudrate=9600, timeout=0)
                 self.serial_btn.setText("Disconnect Serial"); self._update_status(f"Serial connected on {port}.")
                 self._reset_serial_indicator("connected")
+                self._active_serial_port = port
                 if not self.serial_timer.isActive():
                     self.serial_timer.start()
             except Exception as e:
                 self._update_status(f"Serial error: {e}")
                 self._reset_serial_indicator("error")
+                if registry is not None:
+                    registry.release_serial(self, port)
         else:
+            port = self._active_serial_port or self.port_edit.currentText().strip()
             self.serial.close(); self.serial_btn.setText("Connect Serial"); self._update_status("Serial disconnected.")
             self._reset_serial_indicator("disconnected")
             self.serial_timer.stop()
             self._hardware_run_active = False
             self._awaiting_switch_start = False
             self._hardware_configured = False
+            if registry is not None and port:
+                registry.release_serial(self, port)
+            self._active_serial_port = ""
 
-    # ---------- Output dir ----------
+    # Output dir
     def _choose_outdir(self):
         d = QFileDialog.getExistingDirectory(self, "Choose output directory")
         if d: self.outdir_edit.setText(d)
 
-    # ---------- Recording ----------
+    # Recording
     def _start_recording(self):
         if self.cap is None:
             QMessageBox.warning(self, "No Camera", "Open a camera before starting recording."); return
@@ -3115,7 +3445,7 @@ class RunTab(QWidget):
             self.rec_indicator.setStyleSheet(f"color:{SUBTXT};")
             self._update_status("Recording stopped.")
 
-    # ---------- Config Save/Load ----------
+    # Config Save/Load
     def _current_config(self) -> dict:
         return {
             "mode": self.mode.currentText(),
@@ -3171,7 +3501,7 @@ class RunTab(QWidget):
         else:
             self._update_status(f"Seed set to {value}.")
 
-    # ---------- Scheduler / Run ----------
+    # Scheduler / Run
     def _mode_changed(self):
         is_periodic = (self.mode.currentText() == "Periodic")
         self.period_sec.setEnabled(is_periodic)
@@ -3254,6 +3584,16 @@ class RunTab(QWidget):
         except Exception:
             pass
         self._finalize_period_calibration()
+        completed_dir = self.run_dir
+        completed_meta = self._pending_run_metadata or {}
+        completed_run_id = None
+        if self.logger:
+            try:
+                completed_run_id = self.logger.run_id
+            except Exception:
+                completed_run_id = None
+        if completed_run_id is None:
+            completed_run_id = completed_meta.get("run_id")
         if self.logger:
             self.logger.close()
             self.logger = None
@@ -3279,11 +3619,18 @@ class RunTab(QWidget):
         self._first_host_tap_monotonic = None
         self._last_host_tap_monotonic = None
         self._refresh_statusline()
+        if completed_dir and completed_run_id:
+            try:
+                self.runCompleted.emit(str(completed_run_id), str(completed_dir))
+            except Exception:
+                pass
 
 
 class DashboardTab(QWidget):
     def __init__(self):
         super().__init__()
+        self.setObjectName("DashboardRoot")
+        self.setAutoFillBackground(True)
         self.library = RunLibrary(BASE_DIR)
         self.current_summary: Optional[RunSummary] = None
         self.current_times: list[float] = []
@@ -3326,15 +3673,15 @@ class DashboardTab(QWidget):
         detail_panel.addWidget(self.info_label)
 
         # Chart reuse LiveChart
-        chart_frame = QFrame()
-        chart_frame.setStyleSheet(f"background: {BG}; border: 1px solid {BORDER};")
-        chart_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        chart_layout = QVBoxLayout(chart_frame)
+        self.chart_frame = QFrame()
+        self.chart_frame.setStyleSheet(f"background: {BG}; border: 1px solid {BORDER};")
+        self.chart_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        chart_layout = QVBoxLayout(self.chart_frame)
         chart_layout.setContentsMargins(0, 0, 0, 0)
         chart_layout.setSpacing(0)
         self.chart = LiveChart(font_family=_FONT_FAMILY, theme=active_theme())
         chart_layout.addWidget(self.chart.canvas)
-        detail_panel.addWidget(chart_frame, 1)
+        detail_panel.addWidget(self.chart_frame, 1)
 
         # Action buttons
         action_row = QHBoxLayout()
@@ -3357,18 +3704,25 @@ class DashboardTab(QWidget):
         root.addLayout(detail_panel, 1)
 
         self.refresh_runs()
+        self.set_theme(active_theme())
 
-    # ---- Run list management ----
+    # Run list management
 
-    def refresh_runs(self):
+    def refresh_runs(self, *_args, select_run: Optional[str] = None):
+        current_target = select_run or (self.current_summary.run_id if self.current_summary else None)
+        self.run_list.blockSignals(True)
         self.run_list.clear()
         runs = self.library.list_runs()
-        for summary in runs:
+        target_row = 0
+        for idx, summary in enumerate(runs):
             item = QListWidgetItem(summary.run_id)
             item.setData(Qt.UserRole, summary)
             self.run_list.addItem(item)
+            if current_target and (summary.run_id == current_target or summary.path.name == current_target):
+                target_row = idx
+        self.run_list.blockSignals(False)
         if runs:
-            self.run_list.setCurrentRow(0)
+            self.run_list.setCurrentRow(target_row)
         else:
             self._set_current_summary(None)
 
@@ -3434,7 +3788,7 @@ class DashboardTab(QWidget):
             return []
         return times
 
-    # ---- Actions ----
+    # Actions
 
     def _require_summary(self) -> Optional[RunSummary]:
         if self.current_summary is None:
@@ -3484,6 +3838,30 @@ class DashboardTab(QWidget):
             QMessageBox.warning(self, "Delete", f"Failed to delete run: {exc}")
             return
         self.refresh_runs()
+
+    def set_theme(self, theme: dict[str, str]):
+        bg = theme.get("BG", BG)
+        text = theme.get("TEXT", TEXT)
+        accent = theme.get("ACCENT", ACCENT)
+        border = theme.get("BORDER", BORDER)
+        mid = theme.get("MID", MID)
+        pal = self.palette()
+        pal.setColor(self.backgroundRole(), QColor(bg))
+        self.setPalette(pal)
+        self.info_label.setStyleSheet(f"color: {text};")
+        self.chart_frame.setStyleSheet(f"background: {bg}; border: 1px solid {border};")
+        list_style = (
+            f"QListWidget {{background: {mid}; color: {text}; border: 1px solid {border};}}\n"
+            f"QListWidget::item:selected {{background: {accent}; color: {bg}; border: 1px solid {accent};}}"
+        )
+        self.run_list.setStyleSheet(list_style.strip())
+        button_style = (
+            f"QPushButton {{background: {mid}; color: {text}; border: 1px solid {theme.get('BUTTON_BORDER', border)}; padding: 4px 10px; border-radius: 0px;}}\n"
+            f"QPushButton:hover {{background: {accent}; color: {bg}; border-color: {accent}; border-radius: 0px;}}"
+        )
+        for btn in (self.refresh_btn, self.open_btn, self.export_btn, self.delete_btn):
+            btn.setStyleSheet(button_style.strip())
+        self.chart.set_theme(theme)
 
 
 def _run_tab_auto_detect_serial_port(self) -> str | None:
@@ -3759,6 +4137,8 @@ def _run_tab_handle_frame(self, frame):
     except Exception:
         pass
     h, w = overlay.shape[:2]
+    if w and h:
+        self._maybe_update_preview_aspect(w, h)
     qimg = QImage(overlay.data, w, h, 3 * w, QImage.Format_BGR888)
     pix = QPixmap.fromImage(qimg)
     self.video_view.set_image(pix)
@@ -3773,30 +4153,17 @@ def _run_tab_start_frame_stream(self):
     if self.cap is None or self._frame_worker is not None:
         return
     interval = int(1000 / max(1, self.preview_fps))
-    self._frame_thread = QThread(self)
     self._frame_worker = FrameWorker(self.cap, interval)
-    self._frame_worker.moveToThread(self._frame_thread)
     self._frame_worker.frameReady.connect(self._handle_frame, Qt.QueuedConnection)
     self._frame_worker.error.connect(self._update_status, Qt.QueuedConnection)
-    self._frame_worker.stopped.connect(self._frame_thread.quit)
-    self._frame_thread.finished.connect(self._cleanup_frame_stream)
-    self._frame_thread.start()
-    QMetaObject.invokeMethod(self._frame_worker, "start", Qt.QueuedConnection)
+    self._frame_worker.stopped.connect(self._cleanup_frame_stream, Qt.QueuedConnection)
+    self._frame_worker.start()
 
 
 def _run_tab_stop_frame_stream(self):
     worker = self._frame_worker
-    thread = self._frame_thread
     if worker:
-        QMetaObject.invokeMethod(worker, "stop", Qt.QueuedConnection)
-    if thread:
-        thread.quit()
-        if not thread.wait(2000):
-            try:
-                thread.terminate()
-            except Exception:
-                pass
-            thread.wait(200)
+        worker.stop()
     self._cleanup_frame_stream()
 
 
@@ -3807,12 +4174,6 @@ def _run_tab_cleanup_frame_stream(self):
         except Exception:
             pass
         self._frame_worker = None
-    if self._frame_thread is not None:
-        try:
-            self._frame_thread.deleteLater()
-        except Exception:
-            pass
-        self._frame_thread = None
 
 
 def _run_tab_on_port_text_changed(self, text: str):
@@ -3843,12 +4204,35 @@ def _run_tab_shutdown(self):
         except Exception:
             pass
         self.cap = None
+    self.session.camera_index = None
     if self._pip_window:
         try:
             self._pip_window.close()
         except Exception:
             pass
         self._pip_window = None
+    if self.serial.is_open():
+        try:
+            self.serial.close()
+        except Exception:
+            pass
+        try:
+            self.serial_btn.setText("Connect Serial")
+        except Exception:
+            pass
+        self._reset_serial_indicator("disconnected")
+    self.serial_timer.stop()
+    self._hardware_run_active = False
+    self._awaiting_switch_start = False
+    self._hardware_configured = False
+    self._active_serial_port = ""
+    registry = getattr(self, "_resource_registry", None)
+    if registry is not None:
+        registry.release_all(self)
+    try:
+        self.session.reset_runtime_state()
+    except Exception:
+        pass
 
 
 RunTab.shutdown = _run_tab_shutdown
@@ -3857,34 +4241,404 @@ RunTab.shutdown = _run_tab_shutdown
 class App(QWidget):
     def __init__(self):
         super().__init__()
+        global _APP_ICON
         self.setWindowTitle(f"NEMESIS {APP_VERSION} — Non-periodic Event Monitoring & Evaluation of Stimulus-Induced States")
-        if LOGO_PATH.exists():
-            self.setWindowIcon(QIcon(str(LOGO_PATH)))
-        self.resize(1260, 800)
-        self.setMinimumSize(900, 540)
+        if _APP_ICON is not None:
+            self.setWindowIcon(_APP_ICON)
+        self.resize(1320, 820)
+        self.setMinimumSize(1280, 780)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        self.resource_registry = ResourceRegistry()
+        self._run_tab_counter = 1
+        self._run_tab_custom_names: dict[RunTab, Optional[str]] = {}
+        self._data_tabs: list[DashboardTab] = []
+        self._data_tab_custom_names: dict[DashboardTab, Optional[str]] = {}
+
         self.tab_widget = QTabWidget()
-        self.tab_widget.setDocumentMode(True)
-        self.tab_widget.setTabsClosable(False)
+        self.tab_widget.setDocumentMode(False)
+        self.tab_widget.setTabsClosable(True)
+        try:
+            self.tab_widget.tabCloseRequested.connect(self._handle_tab_close_requested)
+        except Exception:
+            pass
+        try:
+            self.tab_widget.tabBarDoubleClicked.connect(self._on_tab_double_clicked)
+        except Exception:
+            pass
+        tab_bar = LeftAlignTabBar()
+        self.tab_widget.setTabBar(tab_bar)
+        tab_bar.setDrawBase(False)
+        tab_bar.setElideMode(Qt.ElideNone)
 
-        run_tab = RunTab()
-        self.tab_widget.addTab(run_tab, "Run 1")
+        run_tab = RunTab(resource_registry=self.resource_registry)
+        self._register_run_tab(run_tab)
+        self.tab_widget.addTab(run_tab, self._format_run_tab_title(self._run_tab_counter))
+        self._run_tab_custom_names[run_tab] = None
+        self._run_tab_counter += 1
 
-        dashboard = DashboardTab()
-        self.tab_widget.addTab(dashboard, "Dashboard")
+        self._create_dashboard_tab(initial=True)
+        self.tab_widget.setCurrentIndex(0)
+        self._refresh_tab_close_buttons()
 
+        self.new_tab_btn = QPushButton("+ Tab")
+        self.new_tab_btn.setCursor(Qt.PointingHandCursor)
+        self.new_tab_btn.setToolTip("Open a new tab")
+        self.new_tab_btn.clicked.connect(self._show_new_tab_menu)
+        self.tab_widget.setCornerWidget(self.new_tab_btn, Qt.TopRightCorner)
+        self._apply_theme_to_corner_button()
         layout.addWidget(self.tab_widget)
 
     def keyPressEvent(self, event):
+        modifiers = event.modifiers()
+        key = event.key()
+        is_cmd = bool(modifiers & Qt.MetaModifier)
+        is_ctrl = bool(modifiers & Qt.ControlModifier)
+        is_alt = bool(modifiers & Qt.AltModifier)
+        handled = False
+        if is_cmd or is_ctrl:
+            if key == Qt.Key_T:
+                self._show_new_tab_menu()
+                handled = True
+            elif key == Qt.Key_W:
+                self._close_current_tab_with_prompt()
+                handled = True
+            elif is_alt and key in (Qt.Key_Left, Qt.Key_Right):
+                self._cycle_tabs(-1 if key == Qt.Key_Left else 1)
+                handled = True
+        if handled:
+            event.accept()
+            return
         widget = self.tab_widget.currentWidget()
         if isinstance(widget, RunTab):
             widget.keyPressEvent(event)
         else:
             super().keyPressEvent(event)
+
+    def _register_run_tab(self, tab: RunTab):
+        try:
+            tab.runCompleted.connect(self._on_run_completed)
+        except Exception:
+            pass
+        try:
+            tab.themeChanged.connect(self._on_theme_changed)
+        except Exception:
+            pass
+        try:
+            tab.apply_theme_external(_ACTIVE_THEME_NAME)
+        except Exception:
+            pass
+
+    @Slot(str, str)
+    def _on_run_completed(self, run_id: str, run_path: str):
+        if self._data_tabs:
+            try:
+                self._data_tabs[0].refresh_runs(select_run=run_id)
+            except Exception:
+                pass
+
+    @Slot(str)
+    def _on_theme_changed(self, name: str):
+        self._propagate_theme(name, source=self.sender())
+
+    def _propagate_theme(self, name: str, source: Optional[QObject] = None):
+        for idx in range(self.tab_widget.count()):
+            widget = self.tab_widget.widget(idx)
+            if isinstance(widget, RunTab) and widget is not source:
+                try:
+                    widget.apply_theme_external(name)
+                except Exception:
+                    pass
+            elif isinstance(widget, DashboardTab):
+                try:
+                    widget.set_theme(active_theme())
+                except Exception:
+                    pass
+        self._apply_theme_to_corner_button()
+        tab_bar = self.tab_widget.tabBar()
+        if tab_bar is not None:
+            tab_bar.setDrawBase(False)
+            tab_bar.setElideMode(Qt.ElideNone)
+            tab_bar.update()
+        self._update_tab_close_button_styles()
+
+    def _format_run_tab_title(self, index: int) -> str:
+        return f"Run {index}"
+
+    def _format_dashboard_tab_title(self, index: int) -> str:
+        return f"Data {index}"
+
+    @Slot()
+    def _show_new_tab_menu(self):
+        menu = QMenu(self)
+        action_run = menu.addAction("Run Tab")
+        action_dash = menu.addAction("Data Tab")
+        global_pos = self.new_tab_btn.mapToGlobal(QPoint(self.new_tab_btn.width(), self.new_tab_btn.height()))
+        chosen = menu.exec(global_pos)
+        if chosen is action_run:
+            self._create_run_tab()
+        elif chosen is action_dash:
+            self._create_dashboard_tab()
+
+    def _create_run_tab(self):
+        tab = RunTab(resource_registry=self.resource_registry)
+        self._register_run_tab(tab)
+        insert_index = self._first_data_tab_index()
+        if insert_index == -1:
+            insert_index = self.tab_widget.count()
+        self.tab_widget.insertTab(insert_index, tab, self._format_run_tab_title(self._run_tab_counter))
+        self.tab_widget.setCurrentWidget(tab)
+        self._run_tab_custom_names[tab] = None
+        self._run_tab_counter += 1
+        self._refresh_tab_close_buttons()
+
+    def _create_dashboard_tab(self, initial: bool = False):
+        tab = DashboardTab()
+        try:
+            tab.set_theme(active_theme())
+        except Exception:
+            pass
+        self._data_tabs.append(tab)
+        self._data_tab_custom_names[tab] = None
+        default_title = self._format_dashboard_tab_title(len(self._data_tabs))
+        self.tab_widget.addTab(tab, default_title)
+        if not initial:
+            self.tab_widget.setCurrentWidget(tab)
+        self._refresh_tab_close_buttons()
+        return tab
+
+    @Slot(int)
+    def _handle_tab_close_requested(self, index: int):
+        self._request_close_tab(index, prompt=True)
+
+    def _request_close_tab(self, index: int, prompt: bool = True):
+        if self.tab_widget.count() <= 1:
+            return
+        widget = self.tab_widget.widget(index)
+        if widget is None:
+            return
+        if isinstance(widget, RunTab) and prompt and self._run_tab_has_active_state(widget):
+            reply = QMessageBox.question(
+                self,
+                "Close Run Tab",
+                "Closing this run tab will stop any active hardware links, recording, or logging. Continue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                self._refresh_tab_close_buttons()
+                return
+        if isinstance(widget, RunTab):
+            try:
+                widget.shutdown()
+            except Exception:
+                pass
+        self.tab_widget.removeTab(index)
+        if isinstance(widget, RunTab):
+            self._run_tab_custom_names.pop(widget, None)
+        elif isinstance(widget, DashboardTab):
+            if widget in self._data_tabs:
+                self._data_tabs.remove(widget)
+            self._data_tab_custom_names.pop(widget, None)
+        if widget is not None:
+            widget.deleteLater()
+        self._refresh_tab_close_buttons()
+
+    def _run_tab_has_active_state(self, tab: RunTab) -> bool:
+        try:
+            session = tab.session
+        except Exception:
+            return False
+        return bool(
+            getattr(session, "hardware_run_active", False)
+            or getattr(session, "awaiting_switch_start", False)
+            or getattr(session, "logger", None)
+            or tab.cap is not None
+            or tab.recorder is not None
+            or tab.serial.is_open()
+        )
+
+    def _close_current_tab_with_prompt(self):
+        index = self.tab_widget.currentIndex()
+        self._request_close_tab(index, prompt=True)
+
+    def _cycle_tabs(self, direction: int):
+        count = self.tab_widget.count()
+        if count <= 1:
+            return
+        current = self.tab_widget.currentIndex()
+        next_index = (current + direction) % count
+        self.tab_widget.setCurrentIndex(next_index)
+
+    def _refresh_tab_close_buttons(self):
+        tab_bar = self.tab_widget.tabBar()
+        if tab_bar is None:
+            return
+        total = self.tab_widget.count()
+        for idx in range(total):
+            widget = self.tab_widget.widget(idx)
+            if widget is None:
+                continue
+            if total <= 1:
+                tab_bar.setTabButton(idx, QTabBar.RightSide, None)
+                continue
+            self._ensure_close_button(idx, widget)
+        self._update_run_tab_titles()
+        self._update_data_tab_titles()
+        self._update_tab_close_button_styles()
+        self._apply_theme_to_corner_button()
+
+    def _apply_theme_to_corner_button(self):
+        if not hasattr(self, "new_tab_btn") or self.new_tab_btn is None:
+            return
+        theme = active_theme()
+        border = theme.get("BUTTON_BORDER", BORDER)
+        text = theme.get("TEXT", TEXT)
+        base = theme.get("MID", MID)
+        accent = theme.get("ACCENT", ACCENT)
+        base_bg = base
+        hover_fg = theme.get("BG", BG)
+        style = f"""
+        QPushButton {{
+            margin: 6px;
+            padding: 4px 12px;
+            border-radius: 0px;
+            border: 1px solid {border};
+            background: {base_bg};
+            color: {text};
+        }}
+        QPushButton:hover {{
+            background: {accent};
+            color: {hover_fg};
+            border-color: {accent};
+        }}
+        """
+        self.new_tab_btn.setStyleSheet(style.strip())
+        self._update_tab_close_button_styles()
+
+    def _ensure_close_button(self, index: int, widget: QWidget):
+        tab_bar = self.tab_widget.tabBar()
+        if tab_bar is None:
+            return
+        button = tab_bar.tabButton(index, QTabBar.RightSide)
+        if not isinstance(button, QToolButton):
+            button = QToolButton(tab_bar)
+            button.setAutoRaise(True)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setText("×")
+            button.setToolTip("Close tab")
+            button.clicked.connect(lambda _=False, w=widget: self._request_close_widget(w))
+            tab_bar.setTabButton(index, QTabBar.RightSide, button)
+        self._style_tab_close_button(button)
+
+    def _style_tab_close_button(self, button: QToolButton):
+        theme = active_theme()
+        button.setFixedSize(12, 12)
+        button.setStyleSheet(
+            "QToolButton {"
+            "border: none;"
+            "background: transparent;"
+            f"color: {theme.get('TEXT', TEXT)};"
+            "font-size: 10px;"
+            "padding: 0px;"
+            "margin: 0px;"
+            "}"
+            "QToolButton:hover {"
+            f"background: {theme.get('ACCENT', ACCENT)};"
+            f"color: {theme.get('BG', BG)};"
+            "border-radius: 0px;"
+            "}"
+        )
+
+    def _update_tab_close_button_styles(self):
+        tab_bar = self.tab_widget.tabBar()
+        if tab_bar is None:
+            return
+        for idx in range(self.tab_widget.count()):
+            button = tab_bar.tabButton(idx, QTabBar.RightSide)
+            if isinstance(button, QToolButton):
+                self._style_tab_close_button(button)
+
+    def _request_close_widget(self, widget: QWidget):
+        idx = self.tab_widget.indexOf(widget)
+        if idx != -1:
+            self._request_close_tab(idx, prompt=True)
+
+    def _first_data_tab_index(self) -> int:
+        indices = [self.tab_widget.indexOf(tab) for tab in self._data_tabs]
+        indices = [idx for idx in indices if idx != -1]
+        return min(indices) if indices else -1
+
+    def _update_data_tab_titles(self):
+        ordered = sorted(
+            ((self.tab_widget.indexOf(tab), tab) for tab in self._data_tabs),
+            key=lambda pair: pair[0],
+        )
+        for position, (idx, tab) in enumerate(ordered, start=1):
+            if idx == -1:
+                continue
+            custom = self._data_tab_custom_names.get(tab)
+            title = custom.strip() if custom else self._format_dashboard_tab_title(position)
+            self.tab_widget.setTabText(idx, title)
+
+    def _update_run_tab_titles(self):
+        counter = 1
+        for idx in range(self.tab_widget.count()):
+            widget = self.tab_widget.widget(idx)
+            if isinstance(widget, RunTab):
+                custom = self._run_tab_custom_names.get(widget)
+                title = custom.strip() if custom else self._format_run_tab_title(counter)
+                self.tab_widget.setTabText(idx, title)
+                counter += 1
+
+    def _get_run_tab_position(self, tab: RunTab) -> Optional[int]:
+        counter = 1
+        for idx in range(self.tab_widget.count()):
+            widget = self.tab_widget.widget(idx)
+            if isinstance(widget, RunTab):
+                if widget is tab:
+                    return counter
+                counter += 1
+        return None
+
+    def _get_data_tab_position(self, tab: DashboardTab) -> Optional[int]:
+        ordered = sorted(
+            ((self.tab_widget.indexOf(t), t) for t in self._data_tabs),
+            key=lambda pair: pair[0],
+        )
+        for position, (_, widget) in enumerate(ordered, start=1):
+            if widget is tab:
+                return position
+        return None
+
+    @Slot(int)
+    def _on_tab_double_clicked(self, index: int):
+        if index < 0:
+            return
+        widget = self.tab_widget.widget(index)
+        if widget is None:
+            return
+        current_title = self.tab_widget.tabText(index)
+        new_title, accepted = QInputDialog.getText(self, "Rename Tab", "Tab name:", QLineEdit.Normal, current_title)
+        if not accepted:
+            return
+        new_title = new_title.strip()
+        if not new_title:
+            return
+        if isinstance(widget, RunTab):
+            position = self._get_run_tab_position(widget) or 0
+            default_name = self._format_run_tab_title(position)
+            self._run_tab_custom_names[widget] = None if new_title == default_name else new_title
+        elif isinstance(widget, DashboardTab):
+            position = self._get_data_tab_position(widget) or 0
+            default_name = self._format_dashboard_tab_title(position)
+            self._data_tab_custom_names[widget] = None if new_title == default_name else new_title
+        self.tab_widget.setTabText(index, new_title)
+        self._refresh_tab_close_buttons()
+
     def _send_tap(self, mark="scheduled"):
         # Do not log or count taps if serial is disconnected
         if not self.serial.is_open():
@@ -3922,7 +4676,7 @@ class App(QWidget):
             except Exception:
                 pass
 
-    # ---------- Frame loop ----------
+    # Frame loop
     def _handle_frame(self, frame):
         if self.cap is None or frame is None:
             return
@@ -3934,6 +4688,8 @@ class App(QWidget):
         except Exception:
             pass
         h, w = overlay.shape[:2]
+        if w and h:
+            self._maybe_update_preview_aspect(w, h)
         qimg = QImage(overlay.data, w, h, 3*w, QImage.Format_BGR888)
         pix = QPixmap.fromImage(qimg)
         self.video_view.set_image(pix)
@@ -3947,29 +4703,16 @@ class App(QWidget):
         if self.cap is None or self._frame_worker is not None:
             return
         interval = int(1000 / max(1, self.preview_fps))
-        self._frame_thread = QThread(self)
         self._frame_worker = FrameWorker(self.cap, interval)
-        self._frame_worker.moveToThread(self._frame_thread)
         self._frame_worker.frameReady.connect(self._handle_frame, Qt.QueuedConnection)
         self._frame_worker.error.connect(self._update_status, Qt.QueuedConnection)
-        self._frame_worker.stopped.connect(self._frame_thread.quit)
-        self._frame_thread.finished.connect(self._cleanup_frame_stream)
-        self._frame_thread.started.connect(self._frame_worker.start)
-        self._frame_thread.start()
+        self._frame_worker.stopped.connect(self._cleanup_frame_stream, Qt.QueuedConnection)
+        self._frame_worker.start()
 
     def _stop_frame_stream(self):
         worker = self._frame_worker
-        thread = self._frame_thread
         if worker:
-            QMetaObject.invokeMethod(worker, "stop", Qt.QueuedConnection)
-        if thread:
-            thread.quit()
-            if not thread.wait(2000):
-                try:
-                    thread.terminate()
-                except Exception:
-                    pass
-                thread.wait(200)
+            worker.stop()
         self._cleanup_frame_stream()
 
     def _cleanup_frame_stream(self):
@@ -3979,14 +4722,9 @@ class App(QWidget):
             except Exception:
                 pass
             self._frame_worker = None
-        if self._frame_thread is not None:
-            try:
-                self._frame_thread.deleteLater()
-            except Exception:
-                pass
-            self._frame_thread = None
 
-    # ---------- Status line refresh ----------
+
+    # Status line refresh
     def _refresh_statusline(self):
         run_id = self.logger.run_id if self.logger else "-"
         cam_idx = self.cam_index.value()
@@ -4250,12 +4988,13 @@ def main():
     except Exception:
         pass
     app.setStyleSheet(build_stylesheet(_FONT_FAMILY, 1.0))
-    # Set app-level icon (matters on macOS)
+    global _APP_ICON
     try:
-        if LOGO_PATH.exists():
-            app.setWindowIcon(QIcon(str(LOGO_PATH)))
+        _APP_ICON = build_app_icon()
+        if _APP_ICON is not None:
+            app.setWindowIcon(_APP_ICON)
     except Exception:
-        pass
+        _APP_ICON = None
     w = App(); w.show()
     sys.exit(app.exec())
 

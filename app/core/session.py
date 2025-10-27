@@ -33,6 +33,8 @@ class RunSession:
     first_host_tap_monotonic: Optional[float] = None
     last_host_tap_monotonic: Optional[float] = None
     active_serial_port: str = ""
+    camera_index: Optional[int] = None
+    preview_size: tuple[int, int] = (0, 0)
 
     recent_intervals: Deque[float] = field(default_factory=lambda: deque(maxlen=10))
     last_tap_timestamp: Optional[float] = None
@@ -56,6 +58,8 @@ class RunSession:
         self.first_host_tap_monotonic = None
         self.last_host_tap_monotonic = None
         self.active_serial_port = ""
+        self.camera_index = None
+        self.preview_size = (0, 0)
         self.recent_intervals.clear()
         self.last_tap_timestamp = None
         self.preview_frame_counter = 0
