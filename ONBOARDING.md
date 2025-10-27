@@ -1,32 +1,34 @@
 # NEMESIS Onboarding
 
 **NEMESIS** — *Non‑periodic Event Monitoring & Evaluation of Stimulus‑Induced States*  
-Version: **1.0‑rc1**
+Version: **1.0-preview**
 
 This document gets a new contributor from zero → productive. It summarizes the system, how to run it, how the data flow works, and what’s left to ship v1.0.
 
-> **Heads up:** The `main` branch is currently in the middle of a tabbed UI refactor. Expect camera preview glitches and other rough edges while the work lands. If you need the stable single-window panel, check out tag `1.0-rc1` (commit `0262552`).
-
----
 
 ## 1) What this is
 
 A desktop acquisition app that:
-- Shows a live USB‑microscope preview (“photo‑booth” style)
+- Shows a live USB-microscope preview (“photo-booth” style)
 - Adapts preview aspect to the camera (4:3/16:9/16:10) and hides the idle border once the first frame arrives
-- Drives an Arduino‑controlled stepper “tapper” with **Periodic** or **Poisson** schedules
+- Drives an Arduino-controlled stepper “tapper” with **Periodic** or **Poisson** schedules
 - Records MP4 video independently of tapping (can be on/off at any time)
 - Logs **every tap** to CSV (v1.0 schema) and captures **run.json** snapshot for traceability
 - Produces publishable plots from CSV via `app/core/plotter.py`
 - Anchors each tap to both host UTC and firmware clock and records the preview/recorded frame indices so video and telemetry stay aligned.
+- Manages acquisition sessions inside a tabbed workspace with per-tab hardware locking, rename-on-double-click, hover-only close controls, and keyboard shortcuts for tab creation/teardown.
 
-### Current project (in flight)
-- Refactor the legacy single-window UI into per-run `RunTab`s plus a dashboard workspace.
-- Isolate all run state inside `RunSession` so multiple rigs can run concurrently in the future.
-- Expand the dashboard to manage historical runs (plot tweaks, export to Sheets/Excel, quick file ops).
-- Coordinate hardware resources (camera index + serial port) across tabs without conflicts.
+### Current architecture snapshot
+- The first tab is a `RunTab`; `+ Tab` (or Cmd/Ctrl+T) opens a chooser to spawn another Run or Data tab. Cmd/Ctrl+W closes the active tab, but the last remaining tab stays pinned.
+- Each run tab owns a `RunSession` that wraps camera capture, serial transport, logging, and preview widgets so hardware never leaks across tabs.
+- Camera indices and serial ports are claimed per tab; attempts to reuse a claimed resource raise a friendly warning instead of stealing the device.
+- Data tabs surface the dashboard view for browsing historical runs, exporting artifacts, and clearing recordings without disturbing live sessions.
+- Theme toggles now propagate across run and data tabs; control panels, dashboards, and preview frames stay in sync in Light/Dark modes.
+- The tab bar is left-aligned to match the control stack; close icons appear on hover, and tab width is padded (~30%) to support double-click rename.
+- Layout minimums are anchored so the control column never disappears; overflow uses scroll areas rather than letting widgets clip.
+- App-wide zoom honours Cmd/Ctrl+=/-/0; trackpad pinch is temporarily disabled while we rebuild bounded zoom.
 
-The UI is intentionally **technical & dense** (think Bloomberg/radare2), with a **Pro Mode** for keyboard‑first operation. Typestar OCR is the global font; the default loads in **Light Mode** with controls on the **left** and data on the right (75 % of the width). A custom splitter snaps to 25 % / 50 % / 75 % anchors and briefly highlights the handle when you land on a magnet so it’s easy to hit repeatable layouts without pixel hunting.
+The UI is intentionally **technical & dense** (think Bloomberg/radare2), with a **Pro Mode** for keyboard-first operation. Typestar OCR is the global font; the default loads in **Light Mode** with controls on the **left** and data on the right (75 % of the width). A custom splitter snaps to 25 % / 50 % / 75 % anchors and briefly highlights the handle when you land on a magnet so it’s easy to hit repeatable layouts without pixel hunting.
 
 ---
 
@@ -35,18 +37,10 @@ The UI is intentionally **technical & dense** (think Bloomberg/radare2), with a 
 ```
 run.py                     # Entry point (python run.py)
 app/
-  main.py                 # Qt application shell
-  core/
-    scheduler.py
-    video.py
-    plotter.py
-    configio.py
-    logger.py
-  drivers/
-    controller_driver.py   # shared interfaces
-    arduino_driver.py      # legacy serial backend
-    unit1_driver.py        # UNIT1 placeholder
-  ui/                      # drop .ui/.qss assets as needed
+  main.py                 # Qt application shell (run/data tabs)
+  core/                  # state, IO, scheduler, logging
+  drivers/               # hardware adapters
+  ui/                    # drop .ui/.qss assets as needed
 assets/
   fonts/Typestar OCR Regular.otf
   images/transparent_logo.png
@@ -91,12 +85,17 @@ python run.py
 
 ## 5) Daily workflow
 
-1. **Open NEMESIS.** (Light theme, controls left, 25 %/75 % split.)
-2. **Connect serial.** Use the combo box above the serial section; pick a detected port or type one manually, then click **Connect Serial**.  
+1. **Open NEMESIS.** The app launches into a run tab with the tab bar aligned above the control stack.
+   - Use `+ Tab` or Cmd/Ctrl+T to open another tab; choose **Run Tab** for live acquisition or **Data Tab** for analysis/history.
+   - Double-click a tab title to rename it. Cmd/Ctrl+W closes the active tab only when more than one tab exists; the last tab stays pinned.
+   - Navigate tabs with Cmd+Opt+Arrow (macOS) or Ctrl+Alt+Arrow (Windows/Linux). Close icons stay hidden until you hover them, reducing accidental exits.
+2. **Connect serial.** Use the combo box above the serial section; pick a detected port or type one manually, then click **Connect Serial**.
+   - Tabs coordinate serial ports automatically; if another tab already owns a port you’ll see an “in use” warning instead of stealing the device.
    - Tap power (“stepsize”) is 1..5; change via dropdown or Pro keys `1..5`.
 3. **Open camera** (select index, hit “Open Camera”). Preview appears.
-   - The preview container shows a subtle box while idle; as soon as the first frame arrives the border hides and the image goes edge‑to‑edge.
-   - The container adapts to the camera aspect; closing the camera restores a 16:9 placeholder.
+   - Camera indices are claimed per tab; trying to reuse one prompts a warning.
+   - The preview container shows a subtle box while idle; as soon as the first frame arrives the border hides and the image goes edge-to-edge.
+   - The container adapts to the camera aspect; closing the camera freezes the last frame in-place so layout stays stable and the slider remains usable.
    - Drag the vertical splitter to resize the preview vs. control panes; it snaps at 25 % / 50 % / 75 % and briefly highlights the handle when you’re on a target.
 4. (Optional) **Start recording** (video is independent of runs; can be toggled live).
 5. Choose mode **Periodic** (seconds) or **Poisson** (taps/min); set parameters.  
@@ -107,7 +106,7 @@ python run.py
       - `run.json` – parameters & environment snapshot
       - `taps.csv` – one row per tap (see schema below)
       - `video.mp4` – if recording was ON at any time
-8. **Stop Run** (or flip the physical switch off) when finished. Use `app/core/plotter.py` to generate rasters/plots. The app records the observed timing drift and saves a per-port calibration to `~/.nemesis/calibration.json`; future periodic runs automatically apply that factor so multi-hour sessions stay aligned with wall-clock seconds. **If the drift still exceeds 1 s/hour, treat as P0—see Reliable Timing section below.**
+8. **Stop Run** (or flip the physical switch off) when finished. Use `app/core/plotter.py` or open a Data Tab to browse rasters, export CSVs, or delete artifacts. The app records the observed timing drift and saves a per-port calibration to `~/.nemesis/calibration.json`; future periodic runs automatically apply that factor so multi-hour sessions stay aligned with wall-clock seconds. **If the drift still exceeds 1 s/hour, treat as P0—see Reliable Timing section below.**
 
 > Still prefer the pre-NEMESIS serial console? Run `python tools/arduino_wrapper.py --port <your_port>`
 > to get the legacy single-character workflow inside the repo. The wrapper sends digits + newline
@@ -152,33 +151,36 @@ Snapshot of parameters captured at **Start Run**:
 
 ---
 
-## 7) Current progress (rc1)
+## 7) Current feature set (1.0 preview)
 
-- ✅ UI with Typestar OCR, dark palette, NEMESIS logo
-- ✅ Live camera preview; start/stop recording (independent of runs)
-- ✅ Preview box hides after first frame; container matches camera aspect
-- ✅ Periodic & Poisson (seedable); dense, technical status line
-- ✅ Pro Mode keyboard controls
-- ✅ Stepsize control wired to firmware + logged per tap
-- ✅ CSV v1.0 logging end‑to‑end; updates `recording_path` mid‑run
-- ✅ Save/Load config (`~/.nemesis/config.json`)
-- ✅ Run snapshot (`run.json`) in each run directory
-- ✅ Version stamp `1.0‑rc1`
-- ✅ Live raster chart embedded under the preview (timeline grows with the run and switches to hours after 2 h)
-- ✅ Dark combobox popups, fixed control widths, left/right splitter to eliminate layout tug
-- ✅ App‑wide pinch zoom + two‑finger browsing; auto‑hiding slim scrollbars
+- ✅ Tabbed workspace with run/data tabs, rename-on-double-click, hover-only close icons, Cmd/Ctrl+T to add and Cmd/Ctrl+W to close (with last-tab guard).
+- ✅ Each run tab owns an isolated `RunSession`; camera and serial hardware are locked per tab and surfaced via friendly warnings.
+- ✅ Dashboard data tabs for browsing, exporting, deleting runs without interrupting live acquisitions.
+- ✅ Light/Dark themes stay consistent across run controls, dashboard panels, and preview/chart surfaces.
+- ✅ Live camera preview; start/stop recording independent of runs.
+- ✅ Preview container adapts to camera aspect, hides the idle border after first frame, and preserves freeze-frame sizing when the camera closes.
+- ✅ Periodic & Poisson schedulers (seedable) with the dense status line and timing telemetry.
+- ✅ Pro Mode keyboard controls and hover tooltips for parity.
+- ✅ Stepsize control wired to firmware + logged per tap.
+- ✅ CSV v1.0 logging end-to-end; updates `recording_path` mid-run.
+- ✅ Save/Load config (`~/.nemesis/config.json`) per workstation.
+- ✅ Run snapshot (`run.json`) in each run directory.
+- ✅ Version stamp `1.0-preview`.
+- ✅ Live raster chart embedded under the preview (timeline auto-grows and switches to hours after 2 h).
+- ✅ Minimum window anchor & scroll areas keep controls reachable on smaller displays.
+- ✅ App-wide zoom via keyboard shortcuts (Cmd/Ctrl+=/-/0) with trackpad pinch temporarily disabled.
 
 ---
 
 ## 8) Roadmap to v1.0
 
-### Must‑ship
+### Must-ship
 1. **Reliability guards**
    - Block *Start Run* if serial disconnected (with “Override anyway” option).
    - Block *Start Recording* if camera closed.
-   - Soft disk‑space warning if free space < **1 GB**.
-2. **Auto‑recording + countdown**
-   - Toggle: “Auto‑start recording when run starts.” (3‑sec overlay countdown; cancel with `Esc`).
+   - Soft disk-space warning if free space < **1 GB**.
+2. **Auto-recording + countdown**
+   - Toggle: “Auto-start recording when run starts.” (3-sec overlay countdown; cancel with `Esc`).
 3. **FPS / drop monitor in status line**
    - Display `fps:N (drop:x%)` from capture & write timing.
 4. **Minimal crash logging**
@@ -186,11 +188,10 @@ Snapshot of parameters captured at **Start Run**:
 5. **Packaging**
    - PyInstaller specs for Win/macOS/Linux; bundle font & logo.
    - Smoke test script and short `RUNNING.md` (permissions & driver notes).
-6. **Docs polish**
-   - README: Quick Start, Keyboard Map, CSV schema v1.0, Known Issues.
-   - Bump `VERSION` → `1.0.0`, tag release.
+6. **Bounded gesture zoom**
+   - Re-enable pinch-to-zoom with sane limits and snap-back so layouts remain recoverable.
 
-### Nice‑to‑have (post‑1.0 or if time permits)
+### Nice-to-have (post-1.0 or if time permits)
 7. **Configured OpenCV Bot (baseline)**
    - `cvbot/` with `config.yaml`, ROI picker, `Analyze Run` button.
    - Output: `analysis.json` + QC image; runs offline after acquisition.
@@ -198,10 +199,6 @@ Snapshot of parameters captured at **Start Run**:
    - On connect: firmware string/version + echo test; show in status line.
 9. **Template export**
    - Export current config as `nemesis_config_<date>.json` for sharing.
-10. **Tabbed run management** *(in progress)*
-    - Stabilise `RunTab` sessions (serial, camera, logging) and dashboard workspace.
-    - Enforce per-tab hardware exclusivity (camera index + serial port).
-    - Add dashboard tooling (timeline trim, recolor, export to Sheets/Excel).
 
 > 🚨 **Urgent**: long-run drift exceeds 1 s/hour on some boards even after calibration. Once timing calibration hits the top of the backlog again, verify firmware scheduling + host factor and update this list.
 

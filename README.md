@@ -14,12 +14,11 @@ NEMESIS is a desktop tool for Stentor habituation experiments:
 
 Current Development Focus
 -------------------------
-- **UI refactor in progress.** The single-window control panel is being migrated into a tabbed shell (`RunTab` + `DashboardTab`). Expect rough edges until the multi-tab architecture is complete (camera preview is temporarily unstable on the `main` branch).
-- **Session encapsulation.** All run state (serial link, scheduler, logging, frame stream) now lives inside a `RunSession`; future tabs will spin up one session per rig.
-- **Dashboard workbench.** A new dashboard tab lists finished runs, previews their rasters, and offers quick actions (open folder, export CSV, delete). Plot customisation and exports are next.
-- **Multi-rig groundwork.** Hardware resource coordination (unique camera index + serial port per tab) is under active development; duplicated bindings are currently blocked manually.
+- **Tabbed workspace.** The run control panel lives in dedicated run tabs; open multiple rigs side-by-side and use the new `+ Tab` launcher (or Cmd/Ctrl+T) to add run or data tabs on demand.
+- **Session encapsulation.** Each tab owns its own `RunSession`, so camera feeds, serial links, logging, and calibration data stay isolated.
+- **Dashboard tabs.** Browse completed runs, preview rasters, open folders, export taps, or delete artifacts from a dedicated data tab — open extras via `+ Tab → Data Tab`.
+- **Multi-rig safeguards.** Camera indices and serial ports are coordinated automatically across tabs to prevent hardware collisions.
 
-> ⚠️ **Need a stable build?** Stick to tag `1.0-rc1` (commit `0262552`) until the tabbed UI lands. The current `main` branch is intentionally unstable while we finish the refactor.
 Hardware/Firmware (upload once)
 -------------------------------
 Use the headless Arduino sketch (`firmware/arduino/stentor_habituator_stepper_v9/NEMESIS_Firmware.ino`). Serial commands:
@@ -34,10 +33,10 @@ UI & Workflow
 -------------
 - **Global font:** Typestar OCR (bundled in `assets/fonts/Typestar OCR Regular.otf`).
 - **Theme:** launches in **Light Mode** with controls on the **left** (25 % width) and data on the right (75 %). Dark Mode is still available from the menu. Typestar OCR remains the global typeface.
-- **Logo:** `assets/images/transparent_logo.png` used as window icon and header badge.
+- **Logo:** `assets/images/transparent_logo.png` is auto-cropped and centred for the app icon and header badge.
 - **Preview panel:** 16:9 container with a subtle border while idle; as soon as the first real frame arrives the border hides and the preview goes edge‑to‑edge. The container adapts to the camera’s native aspect (4:3/16:9/16:10) to avoid letterboxing artifacts.
 - **Live chart:** template‑style stimulus raster (top) embedded under the preview. The timeline expands automatically; after two hours it switches to hours and thins the tick markers so long runs stay readable.
-- **Combobox popups:** dark, padded popup views (no native blue) with fixed control widths to prevent layout nudges.
+- **Tabbed navigation:** run/data tabs sit on a left-aligned bar with hover-only close buttons, rename-on-double-click, and Cmd/Ctrl+W / Cmd/Ctrl+Opt+Arrow shortcuts.
 - **Photo‑booth flow:** connect serial (pick from the dropdown), open camera → adjust focus/POV → optionally **Flash Hardware Config** if you just want to exercise the hardware → press **Start Run** when you’re ready to log. Recording is independent from the run.
 - **Timing calibration:** after each periodic run the app compares host vs. controller timing and stores a per-port calibration in `~/.nemesis/calibration.json`; future runs automatically apply the correction so 24 h “ultra” sessions stay aligned with wall-clock time.
 - **Sanity check:** if you start a run without recording, you'll be prompted to confirm.
@@ -48,7 +47,7 @@ UI & Workflow
 
 Zoom & Navigation
 -----------------
-- **App‑wide zoom:** pinch anywhere to scale the entire UI (pure visual; no reflow). Browser parity: Cmd/Ctrl+= (zoom in), Cmd/Ctrl+- (zoom out), Cmd/Ctrl+0 (reset).
+- **App‑wide zoom:** browser parity shortcuts Cmd/Ctrl+= (zoom in), Cmd/Ctrl+- (zoom out), Cmd/Ctrl+0 (reset). Pinch-to-zoom is currently disabled while we rework layout bounds.
 - **Two‑finger browse:** when zoomed in, pan with two‑finger scroll or drag; slim scrollbars auto‑hide after a short delay. At 1.0× there’s no “give” when the window is at minimum size.
 
 Data & Files
@@ -94,11 +93,11 @@ Roadmap (short list)
 
 Recent Changes (highlights)
 ---------------------------
-- Preview border hides automatically after first frame; container adapts to camera aspect.
-- Live raster chart embedded under the preview (0–70 min, 10‑min majors, 1‑min minors).
-- Raise/Lower Arm jog buttons under Enable/Disable for half‑step nudging.
-- Dark combobox popups with padding; fixed widths prevent layout jitter.
-- App‑wide pinch zoom with auto‑hiding scrollbars; browser shortcuts added.
+- Tabbed run/data workspace with theme-aware styling and keyboard shortcuts.
+- Dashboard tab rebuilt for browsing, exports, and deletions.
+- Per-tab camera/serial locking to support multi-rig setups.
+- Automatic icon generation (cropped transparent logo).
+- Right-panel scroll area and minimum window adjustments to keep controls in frame.
 
 Repo Layout (UI-relevant)
 -------------------------
