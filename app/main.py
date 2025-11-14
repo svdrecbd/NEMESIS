@@ -1,7 +1,7 @@
 # app.py — NEMESIS UI (v1.0-rc1, unified feature set)
-import sys, os, time, json, uuid, csv, threading
+import sys, os, time, json, uuid, csv, threading, math
 from pathlib import Path
-from collections.abc import Sequence
+from collections.abc import Sequence, Callable
 from datetime import datetime, timezone
 from typing import Optional, Any
 
@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QMessageBox, QSizePolicy, QListView, QSplitter, QStyleFactory, QFrame, QSpacerItem,
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsProxyWidget, QSplitterHandle, QMenu,
     QGraphicsOpacityEffect, QTabWidget, QListWidget, QListWidgetItem, QInputDialog, QTabBar, QToolButton,
-    QStyleOptionTab, QStyle, QScrollArea, QStylePainter
+    QStyleOptionTab, QStyle, QScrollArea, QStylePainter, QAbstractItemView
 )
 from PySide6.QtCore import (
     QTimer, Qt, QEvent, QSize, Signal, QObject, Slot, QUrl, QPoint,
@@ -20,10 +20,12 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QImage, QPixmap, QFontDatabase, QFont, QIcon, QPainter, QColor, QPen, QDesktopServices, QCursor, QPalette
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.ticker import MultipleLocator, AutoLocator, NullLocator
 import matplotlib as mpl
 from matplotlib import font_manager
 from serial.tools import list_ports
+import shiboken6
 
 # Internal modules
 from .core import video, scheduler, configio
@@ -33,9 +35,27 @@ from .core.runlib import RunLibrary, RunSummary
 import shutil
 import cv2
 
+HEATMAP_PALETTES = ("inferno", "magma", "cividis", "plasma", "viridis", "turbo")
+
 # Assets & Version
 # Resolve assets relative to the project root, not the current working directory
 BASE_DIR = Path(__file__).resolve().parent.parent
+RUNS_DIR = (BASE_DIR / "runs").resolve()
+RUNS_DIR.mkdir(parents=True, exist_ok=True)
+
+def _migrate_legacy_run_dirs():
+    for legacy in BASE_DIR.glob("run_*"):
+        if not legacy.is_dir():
+            continue
+        dest = RUNS_DIR / legacy.name
+        if dest.exists():
+            continue
+        try:
+            legacy.replace(dest)
+        except Exception:
+            pass
+
+_migrate_legacy_run_dirs()
 ASSETS_DIR = BASE_DIR / "assets"
 FONT_PATH = ASSETS_DIR / "fonts/Typestar OCR Regular.otf"
 LOGO_PATH = ASSETS_DIR / "images/transparent_logo.png"
@@ -446,6 +466,7 @@ def _set_macos_titlebar_appearance(widget: QWidget, color: QColor) -> bool:
     return True
 
 class LiveChart:
+    PALETTES = HEATMAP_PALETTES
     def __init__(self, font_family: str | None, theme: dict[str, str]):
         self.font_family = font_family
         self.theme = theme
@@ -470,6 +491,17 @@ class LiveChart:
         self.times_sec: list[float] = []
         self._time_unit: str = "minutes"
         self._last_max_elapsed_sec: float = 0.0
+        self.replay_targets: list[float] = []
+        self.replay_completed: int = 0
+        self.heatmap_palette: str = HEATMAP_PALETTES[0]
+        self._heatmap_cbar = None
+        self._heatmap_im = None
+        self._heatmap_active = False
+        self._heatmap_listeners: list[Callable[[bool], None]] = []
+        self._long_run_active: bool = False
+        self._long_run_listeners: list[Callable[[bool], None]] = []
+        self._long_run_view: str = "taps"
+        self.contraction_heatmap: np.ndarray | None = None
         self._init_axes()
 
     def _init_axes(self):
@@ -480,12 +512,20 @@ class LiveChart:
             self.fig.patch.set_facecolor('none')
         except Exception:
             pass
-        self._configure_axes("minutes", 0.0)
+        self._configure_standard_axes(0.0)
         self.canvas.draw_idle()
 
     def reset(self):
         self.times_sec.clear()
-        self._init_axes()
+        self.replay_completed = min(self.replay_completed, len(self.replay_targets))
+        self._last_max_elapsed_sec = 0.0
+        self._long_run_view = "taps"
+        self.contraction_heatmap = None
+        self._clear_heatmap_artists()
+        self._configure_standard_axes(0.0)
+        self._set_long_mode(False)
+        self._set_heatmap_state(False)
+        self.canvas.draw_idle()
 
     def add_tap(self, t_since_start_s: float):
         self.times_sec.append(float(t_since_start_s))
@@ -495,32 +535,108 @@ class LiveChart:
         self.times_sec = [float(v) for v in times_seconds]
         self._redraw()
 
+    def set_replay_targets(self, targets: Sequence[float] | None):
+        self.replay_targets = [] if targets is None else [float(v) for v in targets]
+        self.replay_completed = 0
+        self._redraw()
+
+    def mark_replay_progress(self, completed: int):
+        if completed < 0:
+            completed = 0
+        if completed > len(self.replay_targets):
+            completed = len(self.replay_targets)
+        self.replay_completed = completed
+        self._redraw()
+
+    def clear_replay_targets(self):
+        self.replay_targets = []
+        self.replay_completed = 0
+        self._redraw()
+
+    def set_contraction_heatmap(self, matrix: Sequence[Sequence[float]] | None):
+        if matrix is None:
+            self.contraction_heatmap = None
+        else:
+            arr = np.asarray(matrix, dtype=float)
+            if arr.ndim != 2 or arr.size == 0:
+                self.contraction_heatmap = None
+            else:
+                self.contraction_heatmap = arr
+        if self._long_run_view == "contraction" and self._long_run_active:
+            self._redraw()
+
+    def set_long_run_view(self, view: str):
+        view_key = (view or "").strip().lower()
+        if view_key not in {"taps", "contraction"}:
+            return
+        if view_key == self._long_run_view:
+            return
+        self._long_run_view = view_key
+        self._redraw()
+
+    def long_run_view(self) -> str:
+        return self._long_run_view
+
+    def long_run_active(self) -> bool:
+        return self._long_run_active
+
+    def add_long_mode_listener(self, callback: Callable[[bool], None]) -> None:
+        if callback in self._long_run_listeners:
+            try:
+                callback(self._long_run_active)
+            except Exception:
+                pass
+            return
+        self._long_run_listeners.append(callback)
+        try:
+            callback(self._long_run_active)
+        except Exception:
+            pass
+
+
+    def _set_long_mode(self, active: bool) -> None:
+        if self._long_run_active == active:
+            return
+        self._long_run_active = active
+        if not active:
+            self._long_run_view = "taps"
+            self._clear_heatmap_artists()
+        for callback in list(self._long_run_listeners):
+            try:
+                callback(active)
+            except Exception:
+                continue
+
     def _redraw(self):
-        if not self.times_sec:
-            self._configure_axes("minutes", 0.0)
+        max_elapsed_sec_actual = max(self.times_sec) if self.times_sec else 0.0
+        max_elapsed_sec_script = max(self.replay_targets) if self.replay_targets else 0.0
+        max_elapsed_sec = max(max_elapsed_sec_actual, max_elapsed_sec_script)
+        if max_elapsed_sec <= 0:
+            self._configure_standard_axes(0.0)
+            self._set_long_mode(False)
+            self._set_heatmap_state(False)
             self.canvas.draw_idle()
             return
 
-        max_elapsed_sec = max(self.times_sec)
-        unit = "hours" if max_elapsed_sec >= 2 * 3600 else "minutes"
-        self._configure_axes(unit, max_elapsed_sec)
+        long_mode = max_elapsed_sec >= 3 * 3600
+        heatmap_on = False
+        if long_mode:
+            if self._long_run_view == "contraction":
+                self._configure_long_heatmap_axes()
+                self._draw_contraction_heatmap()
+                heatmap_on = True
+            else:
+                self._configure_long_raster_axes(max_elapsed_sec)
+                self._draw_long_raster(max_elapsed_sec)
+        else:
+            self._configure_standard_axes(max_elapsed_sec)
+            self._draw_standard_raster()
 
-        factor = 3600.0 if unit == "hours" else 60.0
-        ts_unit = [t / factor for t in self.times_sec]
-        highlighted = [t for i, t in enumerate(ts_unit) if (i + 1) % 10 == 0]
-        regular     = [t for i, t in enumerate(ts_unit) if (i + 1) % 10 != 0]
-
-        text_color = self.color("TEXT")
-        base_width = 0.9 if unit == "minutes" else 0.9
-        highlight_width = 1.6 if unit == "minutes" else 1.6
-        if regular:
-            self.ax_top.eventplot(regular, orientation="horizontal", colors=text_color, linewidth=base_width)
-        if highlighted:
-            self.ax_top.eventplot(highlighted, orientation="horizontal", colors=self.color("ACCENT"), linewidth=highlight_width)
-
+        self._set_long_mode(long_mode)
+        self._set_heatmap_state(heatmap_on)
         self.canvas.draw_idle()
 
-    def _configure_axes(self, unit: str, max_elapsed_sec: float):
+    def _configure_standard_axes(self, max_elapsed_sec: float) -> None:
         text_color = self.color("TEXT")
         ax_top = self.ax_top
         ax_bot = self.ax_bot
@@ -533,12 +649,16 @@ class LiveChart:
         except Exception:
             pass
 
+        self._clear_heatmap_artists()
+
+        ax_bot.set_visible(True)
         ax_top.set_ylabel("Taps", color=text_color)
         ax_top.set_yticks([])
         ax_top.tick_params(axis='x', colors=text_color)
         ax_top.tick_params(axis='y', colors=text_color)
         for spine in ax_top.spines.values():
             spine.set_color(text_color)
+        ax_top.set_title("")
 
         ax_bot.set_ylabel("% Contracted")
         ax_bot.set_ylim(-5, 105)
@@ -547,43 +667,338 @@ class LiveChart:
         ax_bot.tick_params(axis='y', colors=text_color)
         for spine in ax_bot.spines.values():
             spine.set_color(text_color)
+        ax_bot.set_title("")
 
-        factor = 3600.0 if unit == "hours" else 60.0
-        default_limit = 2.0 if unit == "hours" else 70.0
-        max_unit_val = max(default_limit, (max_elapsed_sec / factor) * 1.1 if max_elapsed_sec else default_limit)
+        minutes_span = max_elapsed_sec / 60.0 if max_elapsed_sec else 0.0
+        default_limit = 60.0
+        target_limit = minutes_span * 1.05 if minutes_span else default_limit
+        max_unit_val = max(default_limit, min(180.0, target_limit))
 
-        if unit == "minutes":
-            major = MultipleLocator(10)
-            minor = MultipleLocator(1)
-            ax_top.xaxis.set_major_locator(major)
-            ax_top.xaxis.set_minor_locator(minor)
-            ax_bot.xaxis.set_major_locator(MultipleLocator(10))
-            ax_bot.xaxis.set_minor_locator(MultipleLocator(1))
-            ax_bot.set_xlabel("Time (minutes)")
-            ax_top.grid(True, which="major", axis="x", linestyle=":", alpha=0.9)
-            ax_top.grid(True, which="minor", axis="x", linestyle=":", alpha=0.35)
-            ax_bot.grid(True, which="major", axis="x", linestyle=":", alpha=0.9)
-            ax_bot.grid(True, which="minor", axis="x", linestyle=":", alpha=0.35)
-        else:
-            locator_top = AutoLocator()
-            locator_bot = AutoLocator()
-            ax_top.xaxis.set_major_locator(locator_top)
-            ax_top.xaxis.set_minor_locator(NullLocator())
-            ax_bot.xaxis.set_major_locator(locator_bot)
-            ax_bot.xaxis.set_minor_locator(NullLocator())
-            ax_bot.set_xlabel("Time (hours)")
-            ax_top.grid(True, which="major", axis="x", linestyle=":", alpha=0.9)
-            ax_bot.grid(True, which="major", axis="x", linestyle=":", alpha=0.9)
+        major = MultipleLocator(10)
+        minor = MultipleLocator(1)
+        ax_top.xaxis.set_major_locator(major)
+        ax_top.xaxis.set_minor_locator(minor)
+        ax_bot.xaxis.set_major_locator(MultipleLocator(10))
+        ax_bot.xaxis.set_minor_locator(MultipleLocator(1))
+        ax_bot.set_xlabel("Time (minutes)")
+        ax_top.grid(True, which="major", axis="x", linestyle=":", alpha=0.9)
+        ax_top.grid(True, which="minor", axis="x", linestyle=":", alpha=0.35)
+        ax_bot.grid(True, which="major", axis="x", linestyle=":", alpha=0.9)
+        ax_bot.grid(True, which="minor", axis="x", linestyle=":", alpha=0.35)
 
         ax_top.set_xlim(0, max_unit_val)
         ax_bot.set_xlim(0, max_unit_val)
-        self._time_unit = unit
+        self._time_unit = "minutes"
         self._last_max_elapsed_sec = max_elapsed_sec
         try:
             self.fig.subplots_adjust(top=0.82, bottom=0.18, left=0.10, right=0.98, hspace=0.12)
             self.fig.suptitle("Stentor Habituation to Stimuli", fontsize=10, color=text_color, y=0.98)
         except Exception:
             pass
+
+    def _configure_long_raster_axes(self, max_elapsed_sec: float) -> None:
+        text_color = self.color("TEXT")
+        ax_top = self.ax_top
+        ax_bot = self.ax_bot
+
+        ax_top.cla()
+        ax_bot.cla()
+        try:
+            ax_top.set_facecolor('none')
+            ax_bot.set_facecolor('none')
+        except Exception:
+            pass
+
+        ax_bot.set_visible(False)
+        ax_bot.set_axis_off()
+
+        ax_top.set_visible(True)
+        ax_top.set_ylabel("Hour")
+        ax_top.tick_params(axis='x', colors=text_color)
+        ax_top.tick_params(axis='y', colors=text_color)
+        for spine in ax_top.spines.values():
+            spine.set_color(text_color)
+
+        self._clear_heatmap_artists()
+
+        self._time_unit = "hours"
+        self._last_max_elapsed_sec = max_elapsed_sec
+        try:
+            self.fig.subplots_adjust(top=0.90, bottom=0.10, left=0.10, right=0.98)
+            self.fig.suptitle("Tap raster by hour", fontsize=10, color=text_color, y=0.97)
+        except Exception:
+            pass
+
+    def _configure_long_heatmap_axes(self) -> None:
+        text_color = self.color("TEXT")
+        ax_top = self.ax_top
+        ax_bot = self.ax_bot
+
+        ax_top.cla()
+        ax_bot.cla()
+        try:
+            ax_top.set_facecolor('none')
+            ax_bot.set_facecolor('none')
+        except Exception:
+            pass
+
+        ax_bot.set_visible(False)
+        ax_bot.set_axis_off()
+
+        ax_top.set_visible(True)
+        ax_top.tick_params(axis='x', colors=text_color)
+        ax_top.tick_params(axis='y', colors=text_color)
+        for spine in ax_top.spines.values():
+            spine.set_color(text_color)
+
+        self._time_unit = "hours"
+        try:
+            self.fig.subplots_adjust(top=0.90, bottom=0.10, left=0.10, right=0.92)
+            self.fig.suptitle("Contraction heatmap", fontsize=10, color=text_color, y=0.97)
+        except Exception:
+            pass
+
+    def _draw_standard_raster(self) -> None:
+        text_color = self.color("TEXT")
+        accent_color = self.color("ACCENT")
+        remaining_color = self.color("SUBTXT")
+
+        factor = 60.0
+        ts_unit = [t / factor for t in self.times_sec]
+        highlighted = [t for i, t in enumerate(ts_unit) if (i + 1) % 10 == 0]
+        regular = [t for i, t in enumerate(ts_unit) if (i + 1) % 10 != 0]
+
+        if self.replay_targets:
+            replay_unit = [t / factor for t in self.replay_targets]
+            completed_unit = replay_unit[: self.replay_completed]
+            remaining_unit = replay_unit[self.replay_completed :]
+            if remaining_unit:
+                self.ax_top.eventplot(
+                    remaining_unit,
+                    orientation="horizontal",
+                    colors=remaining_color,
+                    linewidth=0.8,
+                )
+            if completed_unit and not self.times_sec:
+                self.ax_top.eventplot(
+                    completed_unit,
+                    orientation="horizontal",
+                    colors=accent_color,
+                    linewidth=1.0,
+                )
+
+        if regular:
+            self.ax_top.eventplot(regular, orientation="horizontal", colors=text_color, linewidth=0.9)
+        if highlighted:
+            self.ax_top.eventplot(highlighted, orientation="horizontal", colors=accent_color, linewidth=1.6)
+
+    def _draw_long_raster(self, max_elapsed_sec: float) -> None:
+        ax = self.ax_top
+        text_color = self.color("TEXT")
+        accent_color = self.color("ACCENT")
+        pending_color = self.color("SUBTXT")
+
+        taps_actual = np.asarray(self.times_sec, dtype=float)
+        taps_script = np.asarray(self.replay_targets, dtype=float) if self.replay_targets else np.empty(0, dtype=float)
+
+        taps_actual = taps_actual[np.isfinite(taps_actual)]
+        taps_actual = taps_actual[taps_actual >= 0.0]
+        taps_script = taps_script[np.isfinite(taps_script)]
+        taps_script = taps_script[taps_script >= 0.0]
+
+        reference = taps_actual if taps_actual.size else taps_script
+        if reference.size == 0:
+            ax.text(
+                0.5,
+                0.5,
+                "No tap data",
+                color=self.color("SUBTXT"),
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
+            ax.set_axis_off()
+            return
+
+        max_sec = max(max_elapsed_sec, float(reference.max()))
+        hours = max(1, int(math.ceil((max_sec + 1e-9) / 3600.0)))
+        line_offsets = np.arange(hours)
+
+        regular_groups = [[] for _ in range(hours)]
+        highlight_groups = [[] for _ in range(hours)]
+        pending_groups = [[] for _ in range(hours)]
+
+        for idx, value in enumerate(taps_actual):
+            hour = min(int(value // 3600), hours - 1)
+            minute_within_hour = (value % 3600.0) / 60.0
+            if (idx + 1) % 10 == 0:
+                highlight_groups[hour].append(minute_within_hour)
+            else:
+                regular_groups[hour].append(minute_within_hour)
+
+        if taps_script.size:
+            for idx, value in enumerate(taps_script):
+                if idx < self.replay_completed:
+                    continue
+                hour = min(int(value // 3600), hours - 1)
+                minute_within_hour = (value % 3600.0) / 60.0
+                pending_groups[hour].append(minute_within_hour)
+
+        ax.cla()
+        ax.set_visible(True)
+        ax.set_ylabel("Hour")
+        ax.set_xlabel("Minute within hour")
+        ax.tick_params(axis='x', colors=text_color)
+        ax.tick_params(axis='y', colors=text_color)
+        for spine in ax.spines.values():
+            spine.set_color(text_color)
+
+        if any(group for group in pending_groups):
+            ax.eventplot(
+                pending_groups,
+                lineoffsets=line_offsets,
+                linelengths=0.7,
+                linewidth=0.8,
+                colors=pending_color,
+            )
+        if any(group for group in regular_groups):
+            ax.eventplot(
+                regular_groups,
+                lineoffsets=line_offsets,
+                linelengths=0.7,
+                linewidth=0.9,
+                colors=text_color,
+            )
+        if any(group for group in highlight_groups):
+            ax.eventplot(
+                highlight_groups,
+                lineoffsets=line_offsets,
+                linelengths=0.7,
+                linewidth=1.3,
+                colors=accent_color,
+            )
+
+        ax.set_ylim(-0.5, hours - 0.5)
+        ax.set_yticks(line_offsets)
+        ax.set_yticklabels([f"H{h:02d}" for h in range(hours)])
+        ax.invert_yaxis()
+        ax.set_xlim(-0.5, 59.5)
+        ax.set_xticks(np.arange(0, 60, 5))
+        ax.grid(axis="x", which="major", linestyle=":", alpha=0.25)
+
+    def _draw_contraction_heatmap(self) -> None:
+        ax = self.ax_top
+        text_color = self.color("TEXT")
+
+        ax.cla()
+        ax.set_visible(True)
+
+        data = self.contraction_heatmap
+        try:
+            self.fig.suptitle(f"Contraction heatmap — {self.heatmap_palette.title()}", fontsize=10, color=text_color, y=0.97)
+        except Exception:
+            pass
+        if data is None or data.size == 0:
+            ax.text(
+                0.5,
+                0.5,
+                "No contraction data",
+                color=self.color("SUBTXT"),
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
+            ax.set_axis_off()
+            self._clear_heatmap_artists()
+            return
+
+        matrix = np.asarray(data, dtype=float)
+        if matrix.ndim != 2 or matrix.shape[1] == 0:
+            ax.text(
+                0.5,
+                0.5,
+                "Invalid contraction matrix",
+                color=self.color("SUBTXT"),
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
+            ax.set_axis_off()
+            self._clear_heatmap_artists()
+            return
+
+        hours = matrix.shape[0]
+        cmap_name = self.heatmap_palette if self.heatmap_palette in HEATMAP_PALETTES else HEATMAP_PALETTES[0]
+        img = ax.imshow(
+            matrix,
+            aspect="auto",
+            interpolation="nearest",
+            cmap=cmap_name,
+            vmin=0.0,
+            vmax=100.0,
+        )
+        self._heatmap_im = img
+        if self._heatmap_cbar is None:
+            self._heatmap_cbar = self.fig.colorbar(img, ax=ax, pad=0.02, fraction=0.05)
+        else:
+            try:
+                self._heatmap_cbar.update_normal(img)
+            except Exception:
+                self._heatmap_cbar = self.fig.colorbar(img, cax=self._heatmap_cbar.ax)
+
+        try:
+            self._heatmap_cbar.set_label("Contraction %", color=text_color)
+            self._heatmap_cbar.ax.yaxis.set_tick_params(color=text_color)
+            plt.setp(self._heatmap_cbar.ax.get_yticklabels(), color=text_color)
+        except Exception:
+            pass
+
+        ax.set_ylim(-0.5, hours - 0.5)
+        ax.set_yticks(np.arange(hours))
+        ax.set_yticklabels([f"H{h:02d}" for h in range(hours)])
+        ax.invert_yaxis()
+        ax.set_xlim(-0.5, 59.5)
+        ax.set_xticks(np.arange(0, 60, 5))
+        ax.set_xlabel("Minute within hour")
+        ax.set_ylabel("Hour")
+        for spine in ax.spines.values():
+            spine.set_color(text_color)
+        ax.tick_params(axis='x', colors=text_color)
+        ax.tick_params(axis='y', colors=text_color)
+        for x in range(0, 60, 5):
+            ax.axvline(x - 0.5, color=self.color("GRID"), linewidth=0.35, alpha=0.2)
+
+    def set_heatmap_palette(self, palette: str) -> None:
+        candidate = (palette or "").strip().lower()
+        if candidate not in HEATMAP_PALETTES:
+            candidate = HEATMAP_PALETTES[0]
+        if candidate == self.heatmap_palette:
+            return
+        self.heatmap_palette = candidate
+        if self._heatmap_active:
+            try:
+                if self._heatmap_im is not None:
+                    self._heatmap_im.set_cmap(candidate)
+                    if self._heatmap_cbar is not None:
+                        self._heatmap_cbar.update_normal(self._heatmap_im)
+                        self._heatmap_cbar.set_label("Contraction %", color=self.color("TEXT"))
+                        self._heatmap_cbar.ax.yaxis.set_tick_params(color=self.color("TEXT"))
+                        plt.setp(self._heatmap_cbar.ax.get_yticklabels(), color=self.color("TEXT"))
+                else:
+                    self._redraw()
+                try:
+                    self.fig.suptitle(f"Contraction heatmap — {self.heatmap_palette.title()}", fontsize=10, color=self.color("TEXT"), y=0.97)
+                except Exception:
+                    pass
+                self.canvas.draw_idle()
+            except Exception:
+                self._redraw()
+
+    def heatmap_active(self) -> bool:
+        return self._heatmap_active
+
+    def save(self, path: str, dpi: int = 300) -> None:
+        self.fig.savefig(path, dpi=dpi, bbox_inches='tight')
 
     def color(self, key: str) -> str:
         if key in self.theme:
@@ -593,11 +1008,52 @@ class LiveChart:
     def set_theme(self, theme: dict[str, str]):
         self.theme = theme
         apply_matplotlib_theme(self.font_family, theme)
-        if self.times_sec:
+        if self.times_sec or self.replay_targets:
             self._redraw()
         else:
-            self._configure_axes(self._time_unit, self._last_max_elapsed_sec)
+            if self._long_run_active:
+                if self._long_run_view == "contraction":
+                    self._configure_long_heatmap_axes()
+                    self._draw_contraction_heatmap()
+                else:
+                    self._configure_long_raster_axes(self._last_max_elapsed_sec)
+            else:
+                self._configure_standard_axes(self._last_max_elapsed_sec)
+            self._set_long_mode(self._long_run_active)
+            self._set_heatmap_state(self._long_run_active and self._long_run_view == "contraction")
             self.canvas.draw_idle()
+
+    def add_heatmap_listener(self, callback: Callable[[bool], None]) -> None:
+        if callback in self._heatmap_listeners:
+            try:
+                callback(self._heatmap_active)
+            except Exception:
+                pass
+            return
+        self._heatmap_listeners.append(callback)
+        try:
+            callback(self._heatmap_active)
+        except Exception:
+            pass
+
+    def _set_heatmap_state(self, active: bool) -> None:
+        if self._heatmap_active == active:
+            return
+        self._heatmap_active = active
+        for callback in list(self._heatmap_listeners):
+            try:
+                callback(active)
+            except Exception:
+                continue
+
+    def _clear_heatmap_artists(self) -> None:
+        if self._heatmap_cbar is not None:
+            try:
+                self._heatmap_cbar.ax.remove()
+            except Exception:
+                pass
+        self._heatmap_cbar = None
+        self._heatmap_im = None
 
 class ZoomView(QGraphicsView):
     firstFrame = Signal()
@@ -1256,6 +1712,14 @@ class FrameWorker(QObject):
         self._running = False
         self._thread: threading.Thread | None = None
 
+    def _emit_safe(self, signal, *args):
+        if not shiboken6.isValid(self):
+            return
+        try:
+            signal.emit(*args)
+        except RuntimeError:
+            pass
+
     def _loop(self):
         interval = self._interval_s
         next_tick = time.perf_counter()
@@ -1264,10 +1728,10 @@ class FrameWorker(QObject):
                 try:
                     ok, frame = self._capture.read()
                 except Exception as exc:
-                    self.error.emit(f"Camera error: {exc}")
+                    self._emit_safe(self.error, f"Camera error: {exc}")
                     break
                 if ok and frame is not None:
-                    self.frameReady.emit(frame)
+                    self._emit_safe(self.frameReady, frame)
                 if interval > 0:
                     next_tick += interval
                     sleep_for = next_tick - time.perf_counter()
@@ -1277,7 +1741,8 @@ class FrameWorker(QObject):
                         next_tick = time.perf_counter()
         finally:
             self._running = False
-            self.stopped.emit()
+            self._thread = None
+            self._emit_safe(self.stopped)
 
     @Slot()
     def start(self):
@@ -1288,14 +1753,29 @@ class FrameWorker(QObject):
         self._thread.start()
 
     @Slot()
-    def stop(self):
-        if not self._running:
-            return
-        self._running = False
+    def stop(self, wait_timeout: float = 1.0) -> bool:
         thread = self._thread
-        if thread and thread.is_alive() and threading.current_thread() is not thread:
-            thread.join(timeout=0.5)
+        if thread is None:
+            self._running = False
+            self._thread = None
+            return True
+        self._running = False
+        if threading.current_thread() is thread:
+            return False
+        deadline = time.perf_counter() + max(0.0, wait_timeout)
+        while thread.is_alive():
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                break
+            thread.join(timeout=min(0.1, remaining))
+        if thread.is_alive():
+            return False
         self._thread = None
+        return True
+
+    def is_alive(self) -> bool:
+        thread = self._thread
+        return bool(thread and thread.is_alive())
 
 
 class AspectRatioContainer(QWidget):
@@ -1775,6 +2255,11 @@ class RunTab(QWidget):
                 )
             except Exception:
                 pass
+        if hasattr(self, "replicant_status") and self.replicant_status:
+            try:
+                self.replicant_status.setStyleSheet(f"color: {SUBTXT};")
+            except Exception:
+                pass
 
     def _refresh_recording_indicator(self):
         if not hasattr(self, "rec_indicator"):
@@ -1903,14 +2388,6 @@ class RunTab(QWidget):
     def apply_theme_external(self, name: str):
         self._apply_theme(name, broadcast=False, force=True)
 
-    def _set_mirror_mode(self, enabled: bool):
-        enabled = bool(enabled)
-        if enabled == self._mirror_mode:
-            return
-        self._mirror_mode = enabled
-        self._update_mirror_layout()
-        self._sync_logo_menu_checks()
-
     def _update_mirror_layout(self):
         split = getattr(self, "splitter", None)
         left = getattr(self, "_left_widget", None)
@@ -1962,6 +2439,32 @@ class RunTab(QWidget):
             split.setStretchFactor(1, 1)
         except Exception:
             pass
+        self._apply_control_alignment()
+
+    def _apply_control_alignment(self):
+        right = getattr(self, "_right_layout", None)
+        sections = getattr(self, "_section_layouts", None)
+        if right is None or not sections:
+            return
+        align_controls = Qt.AlignRight | Qt.AlignTop
+        if getattr(self, "_mirror_mode", False):
+            align_controls = Qt.AlignLeft | Qt.AlignTop
+        for idx, section in enumerate(sections):
+            try:
+                if idx == 0:
+                    right.setAlignment(section, Qt.AlignLeft | Qt.AlignTop)
+                else:
+                    right.setAlignment(section, align_controls)
+            except Exception:
+                pass
+
+    def _set_mirror_mode(self, enabled: bool):
+        enabled = bool(enabled)
+        if enabled == self._mirror_mode:
+            return
+        self._mirror_mode = enabled
+        self._update_mirror_layout()
+        self._sync_logo_menu_checks()
 
     def _start_theme_transition(self, from_color: str | QColor | None):
         if not from_color:
@@ -2073,10 +2576,13 @@ class RunTab(QWidget):
         # Camera controls
         self.cam_index = QSpinBox(); self.cam_index.setRange(0, 8); self.cam_index.setValue(0)
         self.cam_btn = QPushButton("Open Camera")
+        self.cam_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         # Recording controls (independent)
         self.rec_start_btn = QPushButton("Start Recording")
+        self.rec_start_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.rec_stop_btn  = QPushButton("Stop Recording")
+        self.rec_stop_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.rec_indicator = QLabel("● REC OFF")
         self._recording_active = False
 
@@ -2097,13 +2603,13 @@ class RunTab(QWidget):
         mv.setAttribute(Qt.WA_StyledBackground, True)
         mv.setFrameShape(QFrame.NoFrame)
         self.period_sec = QDoubleSpinBox(); self.period_sec.setRange(0.1, 3600.0); self.period_sec.setValue(10.0); self.period_sec.setSuffix(" s")
-        self.period_sec.setMinimumWidth(135)
-        self.period_sec.setMaximumWidth(200)
         self.period_sec.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.lambda_rpm = QDoubleSpinBox(); self.lambda_rpm.setRange(0.1, 600.0); self.lambda_rpm.setValue(6.0); self.lambda_rpm.setSuffix(" taps/min")
-        self.lambda_rpm.setMinimumWidth(135)
-        self.lambda_rpm.setMaximumWidth(200)
         self.lambda_rpm.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        shared_control_width = 200
+        self.mode.setFixedWidth(shared_control_width)
+        self.period_sec.setFixedWidth(shared_control_width)
+        self.lambda_rpm.setFixedWidth(shared_control_width)
 
         # Stepsize (1..5) — sent to firmware, logged per-tap
         self.stepsize = RunTab.StyledCombo(popup_qss=popup_qss)
@@ -2124,12 +2630,18 @@ class RunTab(QWidget):
         except ValueError:
             s_max_text = "5"
         s_w = s_fm.horizontalAdvance(s_max_text) + 40  # text + arrow/padding
-        self.stepsize.setMinimumWidth(max(150, s_w))
-        self.stepsize.setMaximumWidth(max(210, s_w + 20))
+        self.stepsize.setFixedWidth(max(shared_control_width, s_w + 20))
         self.stepsize.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
-        # Poisson RNG seed (optional)
-        self.seed_edit = QLineEdit(); self.seed_edit.setPlaceholderText("Seed (optional integer)")
+        # Replicant replay controls
+        self.replicant_load_btn = QPushButton("Load CSV…")
+        self.replicant_load_btn.clicked.connect(self._load_replicant_csv)
+        self.replicant_clear_btn = QPushButton("Clear")
+        self.replicant_clear_btn.clicked.connect(self._clear_replicant_csv)
+        self.replicant_status = QLabel("No script loaded")
+        self.replicant_status.setWordWrap(False)
+        self.replicant_status.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.replicant_status.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Fixed)
 
         # Run controls
         self.run_start_btn = QPushButton("Start Run")
@@ -2139,6 +2651,7 @@ class RunTab(QWidget):
 
         # Output directory
         self.outdir_edit = QLineEdit()
+        self.outdir_edit.setText(str(RUNS_DIR))
         self.outdir_btn  = QPushButton("Choose Output Dir")
 
         # Config Save/Load
@@ -2164,6 +2677,21 @@ class RunTab(QWidget):
         chart_layout = QVBoxLayout(self.chart_frame)
         chart_layout.setContentsMargins(0, 0, 0, 0)
         chart_layout.addWidget(self.live_chart.canvas)
+        chart_controls = QHBoxLayout()
+        chart_controls.setContentsMargins(0, 4, 0, 0)
+        chart_controls.setSpacing(6)
+        self.long_mode_combo = QComboBox()
+        self.long_mode_combo.addItem("Tap Raster", "taps")
+        self.long_mode_combo.addItem("Contraction Heatmap", "contraction")
+        self.long_mode_combo.currentIndexChanged.connect(self._on_long_mode_view_changed)
+        self.long_mode_combo.setVisible(False)
+        chart_controls.addWidget(self.long_mode_combo)
+        self.export_plot_btn = QPushButton("Export Plot…")
+        self.export_plot_btn.clicked.connect(self._export_live_chart)
+        chart_controls.addStretch(1)
+        chart_controls.addWidget(self.export_plot_btn)
+        chart_layout.addLayout(chart_controls)
+        self.live_chart.add_long_mode_listener(self._on_live_chart_long_mode)
         # Keep the chart compact so it doesn't force vertical centering
         # Let the canvas drive height; avoid hard caps so layout stays natural
 
@@ -2176,6 +2704,7 @@ class RunTab(QWidget):
             pass
         self.status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self.counters = QLabel("Taps: 0 | Elapsed: 0 s | Rate10: -- /min | Overall: 0.0 /min")
+        self.counters.setWordWrap(True)
         serial_status_row = QHBoxLayout()
         serial_status_row.setContentsMargins(0, 0, 0, 0)
         serial_status_row.setSpacing(12)
@@ -2317,6 +2846,7 @@ class RunTab(QWidget):
         self.popout_btn.setCheckable(True)
         self.popout_btn.setToolTip("Open a floating always-on-top preview window")
         self.popout_btn.toggled.connect(self._toggle_preview_popout)
+        self.popout_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         r2.addWidget(self.popout_btn)
         r2b = QHBoxLayout(); r2b.addWidget(self.rec_start_btn); r2b.addWidget(self.rec_stop_btn); r2b.addWidget(self.rec_indicator)
         camera_section = QVBoxLayout()
@@ -2330,27 +2860,38 @@ class RunTab(QWidget):
         self.lbl_period = QLabel("Period:")
         self.lbl_lambda = QLabel("λ (taps/min):")
         self.lbl_stepsize = QLabel("Stepsize:")
+        self.lbl_replicant = QLabel("Replicant:")
         lfm = self.lbl_mode.fontMetrics()
         label_w = max(
             lfm.horizontalAdvance("Mode:"),
             lfm.horizontalAdvance("Period:"),
             lfm.horizontalAdvance("λ (taps/min):"),
-            lfm.horizontalAdvance("Stepsize:")
+            lfm.horizontalAdvance("Stepsize:"),
+            lfm.horizontalAdvance("Replicant:")
         ) + 8
-        for lbl in (self.lbl_mode, self.lbl_period, self.lbl_lambda, self.lbl_stepsize):
+        for lbl in (self.lbl_mode, self.lbl_period, self.lbl_lambda, self.lbl_stepsize, self.lbl_replicant):
             lbl.setFixedWidth(label_w)
         controls_grid = QGridLayout()
         controls_grid.setContentsMargins(0, 0, 0, 0)
         controls_grid.setHorizontalSpacing(6)
         controls_grid.setVerticalSpacing(4)
-        controls_grid.addWidget(self.lbl_mode, 0, 0, Qt.AlignLeft)
-        controls_grid.addWidget(self.mode, 0, 1)
-        controls_grid.addWidget(self.lbl_period, 1, 0, Qt.AlignLeft)
-        controls_grid.addWidget(self.period_sec, 1, 1)
-        controls_grid.addWidget(self.lbl_lambda, 2, 0, Qt.AlignLeft)
-        controls_grid.addWidget(self.lambda_rpm, 2, 1)
-        controls_grid.addWidget(self.lbl_stepsize, 3, 0, Qt.AlignLeft)
-        controls_grid.addWidget(self.stepsize, 3, 1)
+        replicant_controls = QHBoxLayout()
+        replicant_controls.setContentsMargins(0, 0, 0, 0)
+        replicant_controls.setSpacing(6)
+        replicant_controls.addWidget(self.replicant_status, 1, Qt.AlignLeft)
+        replicant_controls.addStretch(1)
+        replicant_controls.addWidget(self.replicant_load_btn, 0, Qt.AlignRight)
+        replicant_controls.addWidget(self.replicant_clear_btn, 0, Qt.AlignRight)
+        controls_grid.addWidget(self.lbl_replicant, 0, 0, Qt.AlignLeft)
+        controls_grid.addLayout(replicant_controls, 0, 1)
+        controls_grid.addWidget(self.lbl_mode, 1, 0, Qt.AlignLeft)
+        controls_grid.addWidget(self.mode, 1, 1, Qt.AlignRight)
+        controls_grid.addWidget(self.lbl_period, 2, 0, Qt.AlignLeft)
+        controls_grid.addWidget(self.period_sec, 2, 1, Qt.AlignRight)
+        controls_grid.addWidget(self.lbl_lambda, 3, 0, Qt.AlignLeft)
+        controls_grid.addWidget(self.lambda_rpm, 3, 1, Qt.AlignRight)
+        controls_grid.addWidget(self.lbl_stepsize, 4, 0, Qt.AlignLeft)
+        controls_grid.addWidget(self.stepsize, 4, 1, Qt.AlignRight)
         controls_grid.setColumnStretch(1, 1)
         mode_section = QVBoxLayout()
         mode_section.setContentsMargins(0, 0, 0, 0)
@@ -2359,8 +2900,6 @@ class RunTab(QWidget):
         flash_row = QHBoxLayout(); flash_row.setContentsMargins(0, 0, 0, 0); flash_row.addWidget(self.flash_config_btn, 1)
         mode_section.addLayout(flash_row)
 
-        # Seed / run / output configuration cluster
-        r3b = QHBoxLayout(); r3b.addWidget(QLabel("Seed:")); r3b.addWidget(self.seed_edit,1)
         r4 = QHBoxLayout(); r4.addWidget(self.run_start_btn); r4.addWidget(self.run_stop_btn); r4.addWidget(self.clear_data_btn)
         r5 = QHBoxLayout(); r5.addWidget(QLabel("Output dir:")); r5.addWidget(self.outdir_edit,1); r5.addWidget(self.outdir_btn)
 
@@ -2371,7 +2910,6 @@ class RunTab(QWidget):
         io_section = QVBoxLayout()
         io_section.setContentsMargins(0, 0, 0, 0)
         io_section.setSpacing(6)
-        io_section.addLayout(r3b)
         io_section.addLayout(r4)
         io_section.addLayout(r5)
         io_section.addLayout(r5b)
@@ -2534,7 +3072,6 @@ class RunTab(QWidget):
         self.save_cfg_btn.clicked.connect(self._save_config_clicked)
         self.load_cfg_btn.clicked.connect(self._load_config_clicked)
         self.pro_btn.clicked.connect(self._toggle_pro_mode)
-        self.seed_edit.returnPressed.connect(self._on_seed_entered)
         self.period_sec.valueChanged.connect(lambda _v: self._update_status("Period updated."))
         self.lambda_rpm.valueChanged.connect(lambda _v: self._update_status("Lambda updated."))
         self.stepsize.currentTextChanged.connect(self._on_stepsize_changed)
@@ -2551,14 +3088,16 @@ class RunTab(QWidget):
         self.preview_fps = 30
         self.current_stepsize = 4
         self._pip_window: PinnedPreviewWindow | None = None
+        self._motor_enabled = False
         self._calibration_paths: tuple[Path, ...] = (
             Path.home() / ".nemesis" / "calibration.json",
-            BASE_DIR / "runs" / "calibration.json",
+            RUNS_DIR / "calibration.json",
         )
         self._active_calibration_path: Path | None = None
         self._period_calibration: dict[str, float] = self._load_calibration()
         if self._active_calibration_path is None:
             self._active_calibration_path = self._calibration_paths[0]
+        self._awaiting_replicant_timer = False
 
     # Session property shortcuts (for compatibility during refactor)
     @property
@@ -2987,6 +3526,10 @@ class RunTab(QWidget):
         if line.startswith("CONFIG:"):
             self._handle_hardware_config_message(line)
             return
+        if line.startswith("Motor enabled"):
+            self._motor_enabled = True
+        elif line.startswith("Motor disabled"):
+            self._motor_enabled = False
         if hasattr(self, "serial_status"):
             self.serial_status.setText(f"HW → {line}")
 
@@ -3031,20 +3574,24 @@ class RunTab(QWidget):
             self._on_hardware_tap(data, host_ts)
 
     def _compose_hardware_config(self) -> tuple[str, dict[str, object]]:
-        mode_text = self.mode.currentText()
-        mode_token = 'P' if mode_text == "Periodic" else 'R'
+        use_replicant = self._replicant_mode_active()
+        mode_text = "Replicant" if use_replicant else self.mode.currentText()
+        mode_token = 'H' if use_replicant else ('P' if mode_text == "Periodic" else 'R')
         stepsize = max(1, min(int(self.current_stepsize), 5))
         period_s = float(self.period_sec.value())
         lambda_rpm = float(self.lambda_rpm.value())
         port = self.port_edit.currentText().strip()
+        calibration: float | None = None
         if mode_token == 'P':
             period_s = max(0.001, period_s)
             calibration = self._lookup_period_calibration(port)
             adjusted_period = period_s * calibration
             config_value = f"{adjusted_period:.6f}"
-        else:
+        elif mode_token == 'R':
             lambda_rpm = max(0.01, lambda_rpm)
             config_value = f"{lambda_rpm:.6f}"
+        else:
+            config_value = f"{self.session.replicant_total}"
         message = f"C,{mode_token},{stepsize},{config_value}\n"
         meta = {
             "mode": mode_token,
@@ -3053,13 +3600,16 @@ class RunTab(QWidget):
             "value": config_value,
             "period_sec": period_s,
             "lambda_rpm": lambda_rpm,
-            "seed": self._seed_value_or_none(),
-            "outdir": self.outdir_edit.text().strip() or os.getcwd(),
+            "seed": None,
+            "outdir": self.outdir_edit.text().strip() or str(RUNS_DIR),
             "rec_path": getattr(self.recorder, "path", ""),
             "timestamp": time.strftime("%Y%m%d_%H%M%S"),
             "port": port,
-            "period_calibration": calibration,
+            "period_calibration": float(calibration) if calibration is not None else None,
+            "replicant_path": self.session.replicant_path,
+            "replicant_taps": self.session.replicant_total,
         }
+        self.session.replicant_enabled = use_replicant
         return message, meta
 
     def _clear_run_data(self):
@@ -3112,9 +3662,57 @@ class RunTab(QWidget):
         self._send_serial_char('e', "Enable motor")
 
     def _manual_tap(self):
+        if not self.serial.is_open():
+            self._update_status("Tap skipped: serial disconnected.")
+            return
+        if not self._motor_enabled:
+            self._send_serial_char('e', "Enable motor")
         self._send_tap("manual")
 
+    def _send_tap(self, mark: str = "scheduled") -> None:
+        if not self.serial.is_open():
+            self._update_status("Tap skipped: serial disconnected.")
+            return
+        host_now = time.monotonic()
+        if mark != "scheduled" and not self._motor_enabled:
+            self._send_serial_char('e', "Enable motor")
+        self._send_serial_char('t', f"Tap ({mark})")
+        self.taps += 1
+        start = self.run_start or host_now
+        elapsed = host_now - start
+        self._record_tap_interval(host_now)
+        if elapsed > 0:
+            self._last_run_elapsed = elapsed
+        recent_rate = self._recent_rate_per_min()
+        recent_str = f"{recent_rate:.2f}" if recent_rate is not None else "--"
+        overall_rate = (self.taps / elapsed * 60.0) if elapsed > 0 else 0.0
+        overall_str = f"{overall_rate:.2f}" if elapsed > 0 else "--"
+        elapsed_display = int(round(elapsed))
+        self.counters.setText(
+            f"Taps: {self.taps} | Elapsed: {elapsed_display} s | Rate10: {recent_str} /min | Overall: {overall_str} /min"
+        )
+        if self.logger:
+            host_iso = datetime.now(timezone.utc).isoformat()
+            self.logger.log_tap(
+                host_time_s=host_now,
+                mode=self.mode.currentText(),
+                mark=mark,
+                stepsize=self.current_stepsize,
+                host_iso=host_iso,
+                firmware_ms=None,
+                preview_frame_idx=self._preview_frame_counter,
+                recorded_frame_idx=self._recorded_frame_counter,
+            )
+        if mark == "scheduled" and self.run_start:
+            try:
+                self.live_chart.add_tap(elapsed)
+            except Exception:
+                pass
+
     def _on_tap_due(self):
+        if self.session.replicant_running:
+            self._fire_replicant_tap()
+            return
         self._send_tap("scheduled")
         delay = self.session.scheduler.next_delay_s()
         self.run_timer.start(int(delay * 1000))
@@ -3144,6 +3742,15 @@ class RunTab(QWidget):
         else:
             self._update_status("Hardware run active.")
         self.session.flash_only_mode = False
+        if self.session.replicant_enabled and self.session.replicant_ready:
+            self.session.replicant_running = True
+            self.session.replicant_progress = 0
+            self.session.replicant_index = 0
+            self._awaiting_replicant_timer = False
+            self.live_chart.set_replay_targets(self.session.replicant_offsets)
+            self.live_chart.mark_replay_progress(0)
+            self._update_replicant_status()
+            self._schedule_next_replicant()
 
     def _on_hardware_run_stopped(self):
         if not self.session.hardware_run_active and not self.session.awaiting_switch_start:
@@ -3151,11 +3758,16 @@ class RunTab(QWidget):
         self.session.hardware_run_active = False
         self.session.awaiting_switch_start = False
         self.session.last_hw_tap_ms = None
+        self.session.replicant_running = False
+        self.session.replicant_index = 0
+        self.session.replicant_progress = 0
+        self._awaiting_replicant_timer = False
         self._stop_run(from_hardware=True, reason="Hardware run stopped.")
 
     def _on_hardware_tap(self, data: str, host_timestamp: float | None = None):
         if not self._hardware_run_active:
             return
+        is_replicant = self.session.replicant_running
         host_now = host_timestamp if host_timestamp is not None else time.monotonic()
         if self._first_host_tap_monotonic is None:
             self._first_host_tap_monotonic = host_now
@@ -3194,8 +3806,8 @@ class RunTab(QWidget):
             host_iso = datetime.now(timezone.utc).isoformat()
             self.logger.log_tap(
                 host_time_s=host_now,
-                mode=self.mode.currentText(),
-                mark="hardware",
+                mode="Replicant" if is_replicant else self.mode.currentText(),
+                mark="replicant" if is_replicant else "hardware",
                 stepsize=self.current_stepsize,
                 notes=note,
                 host_iso=host_iso,
@@ -3203,12 +3815,23 @@ class RunTab(QWidget):
                 preview_frame_idx=self._preview_frame_counter,
                 recorded_frame_idx=self._recorded_frame_counter,
             )
+        if is_replicant:
+            self.session.replicant_progress += 1
+            self.live_chart.mark_replay_progress(self.session.replicant_progress)
+            self._update_replicant_status()
+            if (
+                self.session.replicant_progress >= self.session.replicant_total
+                and self.session.replicant_index >= self.session.replicant_total
+            ):
+                self._finish_replicant_sequence()
+            else:
+                self._schedule_next_replicant()
 
     def _initialize_run_logger(self, force: bool = False):
         if self.logger is not None and not force:
             return
         meta = self._pending_run_metadata or {}
-        outdir = meta.get("outdir") or (self.outdir_edit.text().strip() or os.getcwd())
+        outdir = meta.get("outdir") or (self.outdir_edit.text().strip() or str(RUNS_DIR))
         ts = time.strftime("%Y%m%d_%H%M%S")
         if force and self.logger is not None:
             try:
@@ -3227,13 +3850,21 @@ class RunTab(QWidget):
         self.logger = runlogger.RunLogger(run_dir, recording_path=rec_path)
         self.run_dir = run_dir
 
-        seed = meta.get("seed", self._seed_value_or_none())
-        self.session.scheduler.set_seed(seed)
+        seed = meta.get("seed")
+        if seed in (None, "", "None"):
+            self.session.scheduler.set_seed(None)
+        else:
+            try:
+                self.session.scheduler.set_seed(int(seed))
+            except Exception:
+                self.session.scheduler.set_seed(None)
         mode_token = meta.get("mode", 'P')
         if mode_token == 'P':
             self.session.scheduler.configure_periodic(meta.get("period_sec", float(self.period_sec.value())))
-        else:
+        elif mode_token == 'R':
             self.session.scheduler.configure_poisson(meta.get("lambda_rpm", float(self.lambda_rpm.value())))
+        else:
+            self.session.scheduler.configure_periodic(meta.get("period_sec", float(self.period_sec.value())))
 
         run_json = {
             "run_id": self.logger.run_id,
@@ -3252,6 +3883,12 @@ class RunTab(QWidget):
             "hardware_trigger": "switch",
             "config_source": meta.get("source", "unknown"),
         }
+        if meta.get("replicant_path"):
+            run_json["replicant_path"] = meta.get("replicant_path")
+            run_json["replicant_taps"] = meta.get("replicant_taps", 0)
+            duration = self.session.replicant_offsets[-1] if self.session.replicant_offsets else 0.0
+            run_json["replicant_duration_s"] = duration
+            run_json["scheduler"] = {"mode": "Replicant", "total_taps": meta.get("replicant_taps", 0)}
         try:
             with open(run_dir / "run.json", "w", encoding="utf-8") as f:
                 json.dump(run_json, f, indent=2)
@@ -3270,6 +3907,11 @@ class RunTab(QWidget):
         for ch in payload:
             self.serial.send_char(ch)
         self._record_serial_command(payload, note)
+        if len(payload) == 1:
+            if payload == 'e':
+                self._motor_enabled = True
+            elif payload == 'd':
+                self._motor_enabled = False
         return True
 
     # Camera
@@ -3386,6 +4028,7 @@ class RunTab(QWidget):
                 self.serial_btn.setText("Disconnect Serial"); self._update_status(f"Serial connected on {port}.")
                 self._reset_serial_indicator("connected")
                 self._active_serial_port = port
+                self._motor_enabled = False
                 if not self.serial_timer.isActive():
                     self.serial_timer.start()
             except Exception as e:
@@ -3401,6 +4044,7 @@ class RunTab(QWidget):
             self._hardware_run_active = False
             self._awaiting_switch_start = False
             self._hardware_configured = False
+            self._motor_enabled = False
             if registry is not None and port:
                 registry.release_serial(self, port)
             self._active_serial_port = ""
@@ -3410,13 +4054,228 @@ class RunTab(QWidget):
         d = QFileDialog.getExistingDirectory(self, "Choose output directory")
         if d: self.outdir_edit.setText(d)
 
+    # Replicant controls
+    def _replicant_mode_active(self) -> bool:
+        return bool(self.session.replicant_enabled and self.session.replicant_ready)
+
+    def _load_replicant_csv(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select taps.csv to replay",
+            str(Path(self.outdir_edit.text().strip() or RUNS_DIR).resolve()),
+            "CSV Files (*.csv)",
+        )
+        if not path:
+            return
+        if self._load_replicant_from_path(path, quiet=False):
+            self.session.replicant_enabled = self.session.replicant_ready
+            self._mode_changed()
+            self._update_replicant_status()
+
+    def _on_live_chart_long_mode(self, active: bool):
+        if not hasattr(self, "long_mode_combo"):
+            return
+        combo = self.long_mode_combo
+        combo.blockSignals(True)
+        if active:
+            view = self.live_chart.long_run_view()
+            idx = combo.findData(view)
+            if idx < 0:
+                idx = 0
+            combo.setCurrentIndex(idx)
+            combo.setVisible(True)
+        else:
+            combo.setCurrentIndex(0)
+            combo.setVisible(False)
+        combo.blockSignals(False)
+
+    def _on_long_mode_view_changed(self, index: int):
+        if not hasattr(self, "long_mode_combo"):
+            return
+        combo = self.long_mode_combo
+        if not combo.isVisible():
+            return
+        view = combo.itemData(index)
+        if not view:
+            return
+        self.live_chart.set_long_run_view(str(view))
+
+    def _export_live_chart(self):
+        base_dir = Path(self.outdir_edit.text().strip() or RUNS_DIR)
+        default_path = base_dir / f"nemesis_plot_{time.strftime('%Y%m%d_%H%M%S')}.png"
+        dest, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export plot",
+            str(default_path),
+            "PNG Image (*.png);;PDF Document (*.pdf);;SVG Vector (*.svg)"
+        )
+        if not dest:
+            return
+        try:
+            dpi = 300 if selected_filter.startswith("PNG") else 0
+            if dpi:
+                self.live_chart.save(dest, dpi=dpi)
+            else:
+                self.live_chart.save(dest)
+            self._update_status(f"Plot exported → {dest}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Export Plot", f"Failed to export plot: {exc}")
+
+    def _load_replicant_from_path(self, path: str, quiet: bool = False) -> bool:
+        try:
+            offsets, delays = self._parse_replicant_csv(path)
+        except Exception as exc:
+            if not quiet:
+                QMessageBox.warning(self, "Replicant", f"Failed to load taps.csv: {exc}")
+            return False
+        total = len(offsets)
+        self.session.replicant_path = path
+        self.session.replicant_offsets = offsets
+        self.session.replicant_delays = delays
+        self.session.replicant_total = total
+        self.session.replicant_progress = 0
+        self.session.replicant_ready = total > 0
+        summary = "No taps found" if total == 0 else f"{total} taps"
+        if total > 1:
+            duration = offsets[-1]
+            if duration > 0.0:
+                summary += f" • {duration/60.0:.2f} min"
+        self.replicant_status.setText(summary)
+        self.replicant_status.setToolTip(path if total else "")
+        if self.session.replicant_ready:
+            self.session.replicant_enabled = True
+            self.live_chart.set_replay_targets(offsets)
+            if not quiet:
+                self._update_status(f"Replicant script loaded ({total} taps).")
+        else:
+            self.session.replicant_enabled = False
+            self.live_chart.clear_replay_targets()
+            if not quiet:
+                self._update_status("Selected taps.csv did not contain any tap timestamps.")
+        self._mode_changed()
+        self._update_replicant_status()
+        return True
+
+    def _clear_replicant_csv(self, quiet: bool = False):
+        self.session.replicant_path = None
+        self.session.replicant_offsets.clear()
+        self.session.replicant_delays.clear()
+        self.session.replicant_total = 0
+        self.session.replicant_progress = 0
+        self.session.replicant_ready = False
+        self.session.replicant_enabled = False
+        self.replicant_status.setText("No script loaded")
+        self.replicant_status.setToolTip("")
+        self.live_chart.clear_replay_targets()
+        if not quiet:
+            self._update_status("Replicant mode cleared.")
+        self._mode_changed()
+        self._update_replicant_status()
+
+    def _parse_replicant_csv(self, path: str) -> tuple[list[float], list[float]]:
+        offsets: list[float] = []
+        delays: list[float] = []
+        base_ms: float | None = None
+        with open(path, "r", encoding="utf-8", newline="") as fh:
+            reader = csv.DictReader(fh)
+            for row in reader:
+                raw = row.get("t_host_ms") if row else None
+                if raw in (None, ""):
+                    continue
+                try:
+                    host_ms = float(raw)
+                except Exception:
+                    continue
+                if base_ms is None:
+                    base_ms = host_ms
+                offset = max(0.0, (host_ms - base_ms) / 1000.0)
+                offsets.append(offset)
+        if not offsets:
+            raise ValueError("No t_host_ms entries found")
+        previous = 0.0
+        for idx, val in enumerate(offsets):
+            if idx == 0:
+                delays.append(0.0)
+            else:
+                delays.append(max(0.0, val - previous))
+            previous = val
+        return offsets, delays
+
+    def _schedule_next_replicant(self):
+        if not self.session.replicant_running:
+            return
+        total = self.session.replicant_total
+        idx = self.session.replicant_index
+        if idx >= total:
+            self._awaiting_replicant_timer = False
+            if self.session.replicant_progress >= total:
+                self._finish_replicant_sequence()
+            return
+        delays = self.session.replicant_delays
+        while idx < total:
+            delay = 0.0
+            try:
+                delay = max(0.0, float(delays[idx]))
+            except Exception:
+                delay = 0.0
+            if delay <= 0.0005:
+                self._fire_replicant_tap()
+                idx = self.session.replicant_index
+                continue
+            if self.session.replicant_progress < idx:
+                self._awaiting_replicant_timer = False
+                return
+            self._awaiting_replicant_timer = True
+            self.run_timer.start(max(1, int(delay * 1000)))
+            return
+        self._awaiting_replicant_timer = False
+
+    def _fire_replicant_tap(self):
+        idx = self.session.replicant_index
+        if idx >= self.session.replicant_total:
+            return
+        self._send_serial_char('t', f"Tap (replicant #{idx + 1})")
+        self.session.replicant_index += 1
+        self._awaiting_replicant_timer = False
+
+    def _finish_replicant_sequence(self):
+        if not self.session.replicant_running:
+            return
+        self.session.replicant_running = False
+        self._awaiting_replicant_timer = False
+        self.session.replicant_index = self.session.replicant_total
+        self._update_replicant_status()
+        if self._hardware_run_active:
+            self._stop_run(reason="Replicant script completed.")
+
+    def _update_replicant_status(self):
+        if not hasattr(self, "replicant_status") or self.replicant_status is None:
+            return
+        if not self.session.replicant_ready:
+            self.replicant_status.setText("No script loaded")
+            self.replicant_status.setToolTip("")
+            return
+        total = self.session.replicant_total
+        duration = self.session.replicant_offsets[-1] if self.session.replicant_offsets else 0.0
+        if self.session.replicant_running:
+            text = f"{self.session.replicant_progress}/{total} taps"
+        elif self.session.replicant_progress >= total and total > 0:
+            text = f"Completed {total} taps"
+        else:
+            text = f"{total} taps"
+            if duration > 0.0:
+                text += f" • {duration/60.0:.2f} min"
+        self.replicant_status.setText(text)
+        if self.session.replicant_path:
+            self.replicant_status.setToolTip(self.session.replicant_path)
+
     # Recording
     def _start_recording(self):
         if self.cap is None:
             QMessageBox.warning(self, "No Camera", "Open a camera before starting recording."); return
         if self.recorder is not None:
             QMessageBox.information(self, "Recording", "Already recording."); return
-        outdir = self.outdir_edit.text().strip() or os.getcwd()
+        outdir = self.outdir_edit.text().strip() or str(RUNS_DIR)
         Path(outdir).mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y%m%d_%H%M%S")
         rec_dir = self.run_dir if self.run_dir is not None else Path(outdir)/f"recording_{ts}"
@@ -3453,9 +4312,9 @@ class RunTab(QWidget):
             "lambda_rpm": self.lambda_rpm.value(),
             "stepsize": self.current_stepsize,
             "camera_index": self.cam_index.value(),
-            "serial_port": self.port_edit.text().strip(),
-            "seed": self._seed_value_or_none(),
+            "serial_port": self.port_edit.currentText().strip(),
             "output_dir": self.outdir_edit.text().strip(),
+            "replicant_path": self.session.replicant_path or "",
             "app_version": APP_VERSION,
         }
 
@@ -3466,11 +4325,19 @@ class RunTab(QWidget):
             self.lambda_rpm.setValue(float(cfg.get("lambda_rpm", 6.0)))
             self._apply_stepsize(int(cfg.get("stepsize", 4)))
             self.cam_index.setValue(int(cfg.get("camera_index", 0)))
-            self.port_edit.setText(cfg.get("serial_port", ""))
-            seed = cfg.get("seed", None)
-            self.seed_edit.setText("" if seed in (None, "") else str(seed))
+            self.port_edit.setCurrentText(cfg.get("serial_port", ""))
             outdir = cfg.get("output_dir", "")
             if outdir: self.outdir_edit.setText(outdir)
+            path = cfg.get("replicant_path", "")
+            if path:
+                if not self._load_replicant_from_path(path, quiet=True):
+                    self._clear_replicant_csv(quiet=True)
+                else:
+                    self.session.replicant_enabled = self.session.replicant_ready
+                    self._mode_changed()
+                    self._update_replicant_status()
+            else:
+                self._clear_replicant_csv(quiet=True)
         except Exception as e:
             QMessageBox.warning(self, "Config", f"Failed to apply config: {e}")
 
@@ -3487,27 +4354,23 @@ class RunTab(QWidget):
             QMessageBox.information(self, "Load Config", "No saved config found."); return
         self._apply_config(cfg); self._update_status("Config loaded.")
 
-    def _seed_value_or_none(self):
-        txt = self.seed_edit.text().strip()
-        if txt == "": return None
-        try: return int(txt)
-        except Exception: return None
-
-    def _on_seed_entered(self):
-        value = self._seed_value_or_none()
-        if value is None:
-            self.seed_edit.setText("")
-            self._update_status("Seed cleared.")
-        else:
-            self._update_status(f"Seed set to {value}.")
-
     # Scheduler / Run
     def _mode_changed(self):
         is_periodic = (self.mode.currentText() == "Periodic")
-        self.period_sec.setEnabled(is_periodic)
-        self.lbl_period.setEnabled(is_periodic)
-        self.lambda_rpm.setEnabled(not is_periodic)
-        self.lbl_lambda.setEnabled(not is_periodic)
+        if self._replicant_mode_active():
+            self.mode.setEnabled(False)
+            self.lbl_mode.setEnabled(False)
+            self.period_sec.setEnabled(False)
+            self.lbl_period.setEnabled(False)
+            self.lambda_rpm.setEnabled(False)
+            self.lbl_lambda.setEnabled(False)
+        else:
+            self.mode.setEnabled(True)
+            self.lbl_mode.setEnabled(True)
+            self.period_sec.setEnabled(is_periodic)
+            self.lbl_period.setEnabled(is_periodic)
+            self.lambda_rpm.setEnabled(not is_periodic)
+            self.lbl_lambda.setEnabled(not is_periodic)
         # Helpful tooltips to clarify why control is inactive
         self.period_sec.setToolTip("Adjust when Mode is set to Periodic")
         self.lambda_rpm.setToolTip("Adjust when Mode is set to Poisson")
@@ -3517,6 +4380,13 @@ class RunTab(QWidget):
             QMessageBox.warning(self, "Serial", "Connect to the controller before starting a run.")
             return
         self._flash_only_mode = False
+        use_replicant = self._replicant_mode_active()
+        if use_replicant and not self.session.replicant_ready:
+            QMessageBox.warning(self, "Replicant", "Load a taps.csv before starting replicant mode.")
+            return
+        if use_replicant and self.session.replicant_total <= 0:
+            QMessageBox.warning(self, "Replicant", "Loaded taps.csv contains no tap rows.")
+            return
         if self._hardware_run_active:
             if self.logger is None:
                 if self._pending_run_metadata is None:
@@ -3572,6 +4442,15 @@ class RunTab(QWidget):
             pass
 
         meta["source"] = "start_run"
+        if use_replicant:
+            self.session.replicant_index = 0
+            self.session.replicant_progress = 0
+            self.session.replicant_running = False
+            self._awaiting_replicant_timer = False
+            if self.session.replicant_offsets:
+                self.live_chart.set_replay_targets(self.session.replicant_offsets)
+                self.live_chart.mark_replay_progress(0)
+            self._update_replicant_status()
         self._pending_run_metadata = meta
         self._active_serial_port = meta.get("port", self.port_edit.currentText().strip())
         self._initialize_run_logger(force=True)
@@ -3605,6 +4484,11 @@ class RunTab(QWidget):
         self.run_dir = None
         self.run_start = None
         self._pending_run_metadata = None
+        self.session.replicant_running = False
+        self.session.replicant_index = 0
+        self.session.replicant_progress = 0
+        self._awaiting_replicant_timer = False
+        self._update_replicant_status()
         if not from_hardware and self.serial.is_open():
             self._send_serial_char('d', "Disable motor")
         self._hardware_run_active = False
@@ -3631,7 +4515,7 @@ class DashboardTab(QWidget):
         super().__init__()
         self.setObjectName("DashboardRoot")
         self.setAutoFillBackground(True)
-        self.library = RunLibrary(BASE_DIR)
+        self.library = RunLibrary(RUNS_DIR)
         self.current_summary: Optional[RunSummary] = None
         self.current_times: list[float] = []
 
@@ -3657,6 +4541,7 @@ class DashboardTab(QWidget):
         list_panel.addLayout(header)
 
         self.run_list = QListWidget()
+        self.run_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.run_list.itemSelectionChanged.connect(self._on_run_selected)
         list_panel.addWidget(self.run_list, 1)
 
@@ -3681,6 +4566,41 @@ class DashboardTab(QWidget):
         chart_layout.setSpacing(0)
         self.chart = LiveChart(font_family=_FONT_FAMILY, theme=active_theme())
         chart_layout.addWidget(self.chart.canvas)
+        chart_controls = QHBoxLayout()
+        chart_controls.setContentsMargins(0, 4, 0, 0)
+        chart_controls.setSpacing(6)
+        self.long_mode_combo = QComboBox()
+        self.long_mode_combo.addItem("Tap Raster", "taps")
+        self.long_mode_combo.addItem("Contraction Heatmap", "contraction")
+        self.long_mode_combo.currentIndexChanged.connect(self._on_chart_long_mode_changed)
+        self.long_mode_combo.setVisible(False)
+        chart_controls.addWidget(self.long_mode_combo)
+        palette_label = QLabel("Heatmap palette:")
+        self.chart_palette_combo = QComboBox()
+        for palette in LiveChart.PALETTES:
+            self.chart_palette_combo.addItem(palette.capitalize(), palette)
+        idx_palette = self.chart_palette_combo.findData(self.chart.heatmap_palette)
+        if idx_palette != -1:
+            self.chart_palette_combo.setCurrentIndex(idx_palette)
+        self.chart_palette_combo.currentIndexChanged.connect(self._on_chart_palette_changed)
+        self.chart_palette_combo.setEnabled(self.chart.heatmap_active())
+        palette_box = QWidget()
+        palette_box_layout = QHBoxLayout(palette_box)
+        palette_box_layout.setContentsMargins(0, 0, 0, 0)
+        palette_box_layout.setSpacing(6)
+        palette_box_layout.addWidget(palette_label)
+        palette_box_layout.addWidget(self.chart_palette_combo)
+        self.chart_palette_box = palette_box
+        palette_box.setVisible(self.chart.heatmap_active())
+        self.chart_export_btn = QPushButton("Export Plot…")
+        self.chart_export_btn.clicked.connect(self._export_plot_image)
+        self.chart_export_btn.setEnabled(False)
+        chart_controls.addWidget(palette_box)
+        chart_controls.addStretch(1)
+        chart_controls.addWidget(self.chart_export_btn)
+        chart_layout.addLayout(chart_controls)
+        self.chart.add_long_mode_listener(self._on_chart_long_mode_state)
+        self.chart.add_heatmap_listener(self._on_chart_heatmap_mode_changed)
         detail_panel.addWidget(self.chart_frame, 1)
 
         # Action buttons
@@ -3727,27 +4647,70 @@ class DashboardTab(QWidget):
             self._set_current_summary(None)
 
     def _on_run_selected(self):
-        item = self.run_list.currentItem()
-        summary = item.data(Qt.UserRole) if item else None
-        self._set_current_summary(summary)
+        items = self.run_list.selectedItems()
+        count = len(items)
+        self.open_btn.setEnabled(count == 1)
+        self.export_btn.setEnabled(count >= 1)
+        self.delete_btn.setEnabled(count >= 1)
+        if hasattr(self, "chart_export_btn"):
+            self.chart_export_btn.setEnabled(count == 1)
+        if count == 0:
+            self._set_current_summary(None)
+            return
+        if count == 1:
+            item = items[0]
+            summary = item.data(Qt.UserRole) if item else None
+            self._set_current_summary(summary)
+            return
+        summaries = [item.data(Qt.UserRole) for item in items if item and item.data(Qt.UserRole)]
+        self.current_summary = None
+        self.current_times = []
+        self.chart.reset()
+        self.chart.set_contraction_heatmap(None)
+        if not summaries:
+            self.info_label.setText("Select a run to inspect logs and metrics.")
+            return
+        sample_ids = ", ".join(s.run_id for s in summaries[:4])
+        if len(summaries) > 4:
+            sample_ids += ", …"
+        self.info_label.setText(
+            f"{len(summaries)} runs selected. Export creates tap logs for each run; Delete removes their folders.\n"
+            f"Selected preview: {sample_ids}"
+        )
 
     def _set_current_summary(self, summary: Optional[RunSummary]):
         self.current_summary = summary
         self.current_times = []
-        enabled = summary is not None
-        for btn in (self.open_btn, self.export_btn, self.delete_btn):
-            btn.setEnabled(enabled)
         if summary is None:
             self.info_label.setText("Select a run to inspect logs and metrics.")
             self.chart.reset()
+            self.chart.set_contraction_heatmap(None)
+            if hasattr(self, "chart_export_btn"):
+                self.chart_export_btn.setEnabled(False)
             return
 
+        self.export_btn.setEnabled(True)
+        self.delete_btn.setEnabled(True)
         self.info_label.setText(self._format_summary(summary))
+        heatmap = self._load_contraction_heatmap(summary)
+        self.chart.set_contraction_heatmap(heatmap)
         self.current_times = self._load_run_times(summary)
         if self.current_times:
             self.chart.set_times(self.current_times)
         else:
             self.chart.reset()
+        if hasattr(self, "chart_export_btn"):
+            self.chart_export_btn.setEnabled(True)
+
+    def _selected_summaries(self) -> list[RunSummary]:
+        summaries: list[RunSummary] = []
+        for item in self.run_list.selectedItems():
+            if not item:
+                continue
+            summary = item.data(Qt.UserRole)
+            if isinstance(summary, RunSummary):
+                summaries.append(summary)
+        return summaries
 
     def _format_summary(self, summary: RunSummary) -> str:
         parts = [f"<b>{summary.run_id}</b>"]
@@ -3788,56 +4751,178 @@ class DashboardTab(QWidget):
             return []
         return times
 
-    # Actions
+    def _on_chart_long_mode_state(self, active: bool):
+        if not hasattr(self, "long_mode_combo"):
+            return
+        combo = self.long_mode_combo
+        combo.blockSignals(True)
+        if active:
+            view = self.chart.long_run_view()
+            idx = combo.findData(view)
+            if idx < 0:
+                idx = 0
+            combo.setCurrentIndex(idx)
+            combo.setVisible(True)
+        else:
+            combo.setCurrentIndex(0)
+            combo.setVisible(False)
+        combo.blockSignals(False)
 
-    def _require_summary(self) -> Optional[RunSummary]:
-        if self.current_summary is None:
+    def _on_chart_long_mode_changed(self, index: int):
+        if not hasattr(self, "long_mode_combo"):
+            return
+        combo = self.long_mode_combo
+        if not combo.isVisible():
+            return
+        view = combo.itemData(index)
+        if not view:
+            return
+        self.chart.set_long_run_view(str(view))
+
+
+    def _load_contraction_heatmap(self, summary: RunSummary):
+        analysis_path = summary.path / "analysis.json"
+        if analysis_path.exists():
+            try:
+                with analysis_path.open("r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                matrix = data.get("contraction_heatmap")
+                if isinstance(matrix, list):
+                    return matrix
+            except Exception:
+                pass
+        csv_path = summary.path / "contraction_heatmap.csv"
+        if csv_path.exists():
+            try:
+                rows: list[list[float]] = []
+                with csv_path.open("r", encoding="utf-8", newline="") as fh:
+                    reader = csv.reader(fh)
+                    for row in reader:
+                        if row:
+                            rows.append([float(value) for value in row])
+                if rows:
+                    return rows
+            except Exception:
+                pass
+        return None
+
+    def _on_chart_palette_changed(self, index: int):
+        data = self.chart_palette_combo.itemData(index)
+        if not data:
+            return
+        self.chart.set_heatmap_palette(str(data))
+
+    def _on_chart_heatmap_mode_changed(self, active: bool):
+        if hasattr(self, "chart_palette_box"):
+            self.chart_palette_box.setVisible(active)
+        if hasattr(self, "chart_palette_combo"):
+            self.chart_palette_combo.setEnabled(active)
+
+    def _export_plot_image(self):
+        summary = self.current_summary
+        if summary is None:
             QMessageBox.information(self, "Dashboard", "Select a run first.")
-            return None
-        return self.current_summary
-
-    def _open_run_folder(self):
-        summary = self._require_summary()
-        if not summary:
             return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(summary.path.resolve())))
-
-    def _export_run_csv(self):
-        summary = self._require_summary()
-        if not summary:
-            return
+        default_path = summary.path / f"{summary.run_id}_plot.png"
         dest, _ = QFileDialog.getSaveFileName(
             self,
-            "Export taps.csv",
-            str(summary.path / "taps.csv"),
-            "CSV Files (*.csv)",
+            "Export plot",
+            str(default_path),
+            "PNG Image (*.png);;PDF Document (*.pdf);;SVG Vector (*.svg)"
         )
         if not dest:
             return
         try:
-            shutil.copy2(summary.path / "taps.csv", dest)
+            self.chart.save(dest)
         except Exception as exc:
-            QMessageBox.warning(self, "Export", f"Failed to export CSV: {exc}")
+            QMessageBox.warning(self, "Export Plot", f"Failed to export plot: {exc}")
+            return
+        QMessageBox.information(self, "Export Plot", f"Plot exported → {dest}")
+
+    # Actions
+
+    def _open_run_folder(self):
+        summaries = self._selected_summaries()
+        if not summaries:
+            QMessageBox.information(self, "Dashboard", "Select a run first.")
+            return
+        target = summaries[0]
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target.path.resolve())))
+
+    def _export_run_csv(self):
+        summaries = self._selected_summaries()
+        if not summaries:
+            QMessageBox.information(self, "Dashboard", "Select at least one run to export.")
+            return
+        if len(summaries) == 1:
+            summary = summaries[0]
+            dest, _ = QFileDialog.getSaveFileName(
+                self,
+                "Export taps.csv",
+                str(summary.path / "taps.csv"),
+                "CSV Files (*.csv)",
+            )
+            if not dest:
+                return
+            try:
+                shutil.copy2(summary.path / "taps.csv", dest)
+            except Exception as exc:
+                QMessageBox.warning(self, "Export", f"Failed to export CSV: {exc}")
+            return
+
+        dest_dir = QFileDialog.getExistingDirectory(self, "Choose export folder")
+        if not dest_dir:
+            return
+        export_root = Path(dest_dir)
+        failures: list[str] = []
+        exported = 0
+        for summary in summaries:
+            src = summary.path / "taps.csv"
+            if not src.exists():
+                failures.append(f"{summary.run_id}: taps.csv missing")
+                continue
+            dest_path = export_root / f"{summary.run_id}.csv"
+            try:
+                shutil.copy2(src, dest_path)
+                exported += 1
+            except Exception as exc:
+                failures.append(f"{summary.run_id}: {exc}")
+        if failures:
+            QMessageBox.warning(self, "Export", "Some exports failed:\n" + "\n".join(failures[:6]))
+        if exported:
+            QMessageBox.information(self, "Export", f"Exported {exported} CSV files to {export_root}")
 
     def _delete_run(self):
-        summary = self._require_summary()
-        if not summary:
+        summaries = self._selected_summaries()
+        if not summaries:
+            QMessageBox.information(self, "Dashboard", "Select at least one run to delete.")
             return
+        if len(summaries) == 1:
+            summary = summaries[0]
+            prompt = f"Delete run '{summary.run_id}'? This cannot be undone."
+        else:
+            prompt = f"Delete {len(summaries)} runs? This cannot be undone."
         resp = QMessageBox.question(
             self,
             "Delete Run",
-            f"Delete run '{summary.run_id}'? This cannot be undone.",
+            prompt,
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if resp != QMessageBox.Yes:
             return
-        try:
-            shutil.rmtree(summary.path)
-        except Exception as exc:
-            QMessageBox.warning(self, "Delete", f"Failed to delete run: {exc}")
-            return
-        self.refresh_runs()
+        failures: list[str] = []
+        deleted = 0
+        for summary in summaries:
+            try:
+                shutil.rmtree(summary.path)
+                deleted += 1
+            except Exception as exc:
+                failures.append(f"{summary.run_id}: {exc}")
+        if failures:
+            QMessageBox.warning(self, "Delete", "Some deletions failed:\n" + "\n".join(failures[:6]))
+        if deleted:
+            self.refresh_runs()
 
     def set_theme(self, theme: dict[str, str]):
         bg = theme.get("BG", BG)
@@ -4150,6 +5235,10 @@ def _run_tab_handle_frame(self, frame):
 
 
 def _run_tab_start_frame_stream(self):
+    worker = getattr(self, "_frame_worker", None)
+    if worker is not None and not worker.is_alive():
+        self._cleanup_frame_stream()
+        worker = self._frame_worker
     if self.cap is None or self._frame_worker is not None:
         return
     interval = int(1000 / max(1, self.preview_fps))
@@ -4163,17 +5252,34 @@ def _run_tab_start_frame_stream(self):
 def _run_tab_stop_frame_stream(self):
     worker = self._frame_worker
     if worker:
-        worker.stop()
-    self._cleanup_frame_stream()
+        stopped = worker.stop()
+        if stopped:
+            self._cleanup_frame_stream()
 
 
 def _run_tab_cleanup_frame_stream(self):
-    if self._frame_worker is not None:
-        try:
-            self._frame_worker.deleteLater()
-        except Exception:
-            pass
-        self._frame_worker = None
+    worker = self._frame_worker
+    if worker is None:
+        return
+    if worker.is_alive():
+        return
+    try:
+        worker.frameReady.disconnect(self._handle_frame)
+    except Exception:
+        pass
+    try:
+        worker.error.disconnect(self._update_status)
+    except Exception:
+        pass
+    try:
+        worker.stopped.disconnect(self._cleanup_frame_stream)
+    except Exception:
+        pass
+    try:
+        worker.deleteLater()
+    except Exception:
+        pass
+    self._frame_worker = None
 
 
 def _run_tab_on_port_text_changed(self, text: str):
@@ -4291,6 +5397,8 @@ class App(QWidget):
         self.tab_widget.setCornerWidget(self.new_tab_btn, Qt.TopRightCorner)
         self._apply_theme_to_corner_button()
         layout.addWidget(self.tab_widget)
+        self._tab_chord_active = False
+        self._tab_chord_triggered = False
 
     def keyPressEvent(self, event):
         modifiers = event.modifiers()
@@ -4300,8 +5408,17 @@ class App(QWidget):
         is_alt = bool(modifiers & Qt.AltModifier)
         handled = False
         if is_cmd or is_ctrl:
-            if key == Qt.Key_T:
-                self._show_new_tab_menu()
+            if self._tab_chord_active and key in (Qt.Key_R, Qt.Key_F):
+                if key == Qt.Key_R:
+                    self._create_run_tab()
+                else:
+                    self._create_dashboard_tab()
+                self._tab_chord_active = False
+                self._tab_chord_triggered = True
+                handled = True
+            elif key == Qt.Key_T:
+                self._tab_chord_active = True
+                self._tab_chord_triggered = False
                 handled = True
             elif key == Qt.Key_W:
                 self._close_current_tab_with_prompt()
@@ -4309,6 +5426,14 @@ class App(QWidget):
             elif is_alt and key in (Qt.Key_Left, Qt.Key_Right):
                 self._cycle_tabs(-1 if key == Qt.Key_Left else 1)
                 handled = True
+            else:
+                if self._tab_chord_active:
+                    self._tab_chord_active = False
+                    self._tab_chord_triggered = False
+        else:
+            if self._tab_chord_active:
+                self._tab_chord_active = False
+                self._tab_chord_triggered = False
         if handled:
             event.accept()
             return
@@ -4317,6 +5442,23 @@ class App(QWidget):
             widget.keyPressEvent(event)
         else:
             super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        key = event.key()
+        if self._tab_chord_active and key == Qt.Key_T:
+            if not self._tab_chord_triggered:
+                self._tab_chord_active = False
+                self._tab_chord_triggered = False
+                self._show_new_tab_menu()
+            else:
+                self._tab_chord_active = False
+                self._tab_chord_triggered = False
+            event.accept()
+            return
+        if key in (Qt.Key_Meta, Qt.Key_Control):
+            self._tab_chord_active = False
+            self._tab_chord_triggered = False
+        super().keyReleaseEvent(event)
 
     def _register_run_tab(self, tab: RunTab):
         try:
@@ -4639,43 +5781,6 @@ class App(QWidget):
         self.tab_widget.setTabText(index, new_title)
         self._refresh_tab_close_buttons()
 
-    def _send_tap(self, mark="scheduled"):
-        # Do not log or count taps if serial is disconnected
-        if not self.serial.is_open():
-            self._update_status("Tap skipped: serial disconnected.")
-            return
-        t_host = time.monotonic();
-        self._send_serial_char('t', f"Tap ({mark})")
-        self.taps += 1
-        elapsed = t_host - (self.run_start or t_host)
-        self._record_tap_interval(t_host)
-        self._last_run_elapsed = elapsed if elapsed > 0 else self._last_run_elapsed
-        overall_rate = (self.taps/elapsed*60.0) if elapsed>0 else 0.0
-        recent_rate = self._recent_rate_per_min()
-        recent_str = f"{recent_rate:.2f}" if recent_rate is not None else "--"
-        overall_str = f"{overall_rate:.2f}" if elapsed > 0 else "--"
-        elapsed_display = int(round(elapsed))
-        self.counters.setText(
-            f"Taps: {self.taps} | Elapsed: {elapsed_display} s | Rate10: {recent_str} /min | Overall: {overall_str} /min"
-        )
-        if self.logger:
-            host_iso = datetime.now(timezone.utc).isoformat()
-            self.logger.log_tap(
-                host_time_s=t_host,
-                mode=self.mode.currentText(),
-                mark=mark,
-                stepsize=self.current_stepsize,
-                host_iso=host_iso,
-                firmware_ms=None,
-                preview_frame_idx=self._preview_frame_counter,
-                recorded_frame_idx=self._recorded_frame_counter,
-            )
-        if mark == "scheduled" and self.run_start:
-            try:
-                self.live_chart.add_tap(elapsed)
-            except Exception:
-                pass
-
     # Frame loop
     def _handle_frame(self, frame):
         if self.cap is None or frame is None:
@@ -4732,8 +5837,14 @@ class App(QWidget):
         rec = "REC ON" if self.recorder else "REC OFF"
         port = self.port_edit.currentText().strip() if self.serial.is_open() else "—"
         serial_state = f"serial:{port}" if self.serial.is_open() else "serial:DISCONNECTED"
-        mode = self.mode.currentText()
-        param = f"P={self.period_sec.value():.2f}s" if mode=="Periodic" else f"λ={self.lambda_rpm.value():.2f}/min"
+        if self.session.replicant_running or self._replicant_mode_active():
+            mode = "Replicant"
+            total = self.session.replicant_total
+            completed = self.session.replicant_progress
+            param = f"{completed}/{total} taps" if total else "no-script"
+        else:
+            mode = self.mode.currentText()
+            param = f"P={self.period_sec.value():.2f}s" if mode=="Periodic" else f"λ={self.lambda_rpm.value():.2f}/min"
         taps = self.taps
         if self.run_start:
             elapsed = time.monotonic() - self.run_start
