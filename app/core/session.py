@@ -41,6 +41,15 @@ class RunSession:
     preview_frame_counter: int = 0
     recorded_frame_counter: int = 0
     last_run_elapsed: float = 0.0
+    replicant_enabled: bool = False
+    replicant_ready: bool = False
+    replicant_path: Optional[str] = None
+    replicant_offsets: list[float] = field(default_factory=list)
+    replicant_delays: list[float] = field(default_factory=list)
+    replicant_index: int = 0
+    replicant_total: int = 0
+    replicant_running: bool = False
+    replicant_progress: int = 0
 
     def reset_runtime_state(self) -> None:
         self.logger = None
@@ -65,6 +74,15 @@ class RunSession:
         self.preview_frame_counter = 0
         self.recorded_frame_counter = 0
         self.last_run_elapsed = 0.0
+        self.replicant_enabled = False
+        self.replicant_ready = False
+        self.replicant_path = None
+        self.replicant_offsets.clear()
+        self.replicant_delays.clear()
+        self.replicant_index = 0
+        self.replicant_total = 0
+        self.replicant_running = False
+        self.replicant_progress = 0
 
     def reset_tap_history(self) -> None:
         self.recent_intervals.clear()

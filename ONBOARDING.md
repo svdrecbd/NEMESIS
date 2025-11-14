@@ -99,14 +99,15 @@ python run.py
    - Drag the vertical splitter to resize the preview vs. control panes; it snaps at 25 % / 50 % / 75 % and briefly highlights the handle when you’re on a target.
 4. (Optional) **Start recording** (video is independent of runs; can be toggled live).
 5. Choose mode **Periodic** (seconds) or **Poisson** (taps/min); set parameters.  
-   - Optional **seed** for reproducible Poisson sequences.
+- **Replicant Mode** replays any recorded `taps.csv` one-for-one. Load the file, preview the dashes in the raster, then start the run and flip the physical switch to let the host drive each tap.
 6. *(Optional troubleshooting)* **Flash Hardware Config**. Sends the current settings to the board so you can flip the physical switch and observe motion without logging taps. Status will read “Config flashed for testing…” until you start a run.
-7. **Start Run** when you want to record data.  
+7. **(Optional) Replicant setup.** Load a previous `taps.csv` via the Replicant controls if you want to replay an existing session. The raster will render grey “dashes” for every tap and the Run button stays locked until a file is present. Start Recording if you need video; recording remains independent from the replay.
+8. **Start Run** when you want to record data.  
    - The app resends the configuration, enables logging, and creates `runs/run_YYYYMMDD_HHMMSS_<token>/` with:
       - `run.json` – parameters & environment snapshot
       - `taps.csv` – one row per tap (see schema below)
       - `video.mp4` – if recording was ON at any time
-8. **Stop Run** (or flip the physical switch off) when finished. Use `app/core/plotter.py` or open a Data Tab to browse rasters, export CSVs, or delete artifacts. The app records the observed timing drift and saves a per-port calibration to `~/.nemesis/calibration.json`; future periodic runs automatically apply that factor so multi-hour sessions stay aligned with wall-clock seconds. **If the drift still exceeds 1 s/hour, treat as P0—see Reliable Timing section below.**
+9. **Stop Run** (or flip the physical switch off) when finished. Use `app/core/plotter.py` or open a Data Tab to browse rasters, export CSVs, or delete artifacts. The app records the observed timing drift and saves a per-port calibration to `~/.nemesis/calibration.json`; future periodic runs automatically apply that factor so multi-hour sessions stay aligned with wall-clock seconds. **If the drift still exceeds 1 s/hour, treat as P0—see Reliable Timing section below.** When a replicant script reaches the end of the file, the host stops the run automatically.
 
 > Still prefer the pre-NEMESIS serial console? Run `python tools/arduino_wrapper.py --port <your_port>`
 > to get the legacy single-character workflow inside the repo. The wrapper sends digits + newline
@@ -134,7 +135,7 @@ Columns:
 - `t_host_ms` – host monotonic time (ms) at send
 - `t_host_iso` – ISO8601 UTC timestamp (wall clock) when the host logged the tap
 - `t_fw_ms` – firmware-reported execute time (ms) so you can compare host vs controller
-- `mode` – "Periodic" | "Poisson"
+- `mode` – "Periodic" | "Poisson" | "Replicant"
 - `stepsize` – 1..5 (tap power/microstep profile)
 - `mark` – "scheduled" | "manual"
 - `notes` – freeform (reserved)
@@ -146,7 +147,7 @@ Columns:
 Snapshot of parameters captured at **Start Run**:
 - `run_id`, `started_at` timestamp, `app_version`, `firmware_commit` placeholder
 - camera index, serial port, current recording path (if any)
-- mode selection with `period_sec` or `lambda_rpm`, seed, stepsize
+- mode selection with `period_sec` or `lambda_rpm`, replicant toggle, stepsize
 - scheduler descriptor mirroring the active settings
 
 ---
@@ -159,7 +160,8 @@ Snapshot of parameters captured at **Start Run**:
 - ✅ Light/Dark themes stay consistent across run controls, dashboard panels, and preview/chart surfaces.
 - ✅ Live camera preview; start/stop recording independent of runs.
 - ✅ Preview container adapts to camera aspect, hides the idle border after first frame, and preserves freeze-frame sizing when the camera closes.
-- ✅ Periodic & Poisson schedulers (seedable) with the dense status line and timing telemetry.
+- ✅ Periodic & Poisson schedulers with live status telemetry.
+- ✅ Replicant mode that replays any recorded `taps.csv` with visual dash tracking.
 - ✅ Pro Mode keyboard controls and hover tooltips for parity.
 - ✅ Stepsize control wired to firmware + logged per tap.
 - ✅ CSV v1.0 logging end-to-end; updates `recording_path` mid-run.
@@ -229,6 +231,7 @@ Snapshot of parameters captured at **Start Run**:
 - [ ] Serial connects; stepsize `1..5` reaches Arduino.
 - [ ] Camera preview visible; recording toggles ON/OFF.
 - [ ] Start Run → `runs/run_*/{run.json,taps.csv}` created; taps appear in CSV.
+- [ ] Replicant: load a taps.csv, dashes appear, replay finishes automatically.
 - [ ] Plotter renders raster from CSV without edits.
 
 ---

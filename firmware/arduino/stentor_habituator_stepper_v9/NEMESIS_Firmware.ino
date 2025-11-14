@@ -1,32 +1,13 @@
 /******************************************************************************
-
-v8 Added random (Poisson) mode with run summary; overhauled timing logic and refactored sketch for robustness.
-v7 change enable and disable so that they apply after every step i.e. if it is in enable
-then it always is left in enable after a step and if it is in disable mode then it is always left 
-disabled after a step
-v6 fixed direction of taps to go down first and then up
-v5 added raise and lower function
-v4  control settings for automatic mode added
-
-overall contorl flow is based on the previous electromaget version of the Stentor habituation
-written by Wallace Marshall with contributions to software from Kyle Barlow, Patrick Harrigan, & Salvador Escobedo
-
-motor control was based on the:  "SparkFun Big Easy Driver Basic Demo"
-Toni Klopfenstein @ SparkFun Electronics
-February 2015
-https://github.com/sparkfun/Big_Easy_Driver
-
-Simple demo sketch to demonstrate how 5 digital pins can drive a bipolar stepper motor,
-using the Big Easy Driver (https://www.sparkfun.com/products/12859). Also shows the ability to change
-microstep size, and direction of motor movement.
-
-Example based off of demos by Brian Schmalz (designer of the Big Easy Driver).
-http://www.schmalzhaus.com/EasyDriver/Examples/EasyDriverExamples.html
+ NEMESIS Firmware — Stentor Habituator Tapper
+ Maintains backwards compatibility with the legacy Arduino rig while UNIT1
+ matures. Supports periodic, Poisson, and host-driven replay ("Replicant")
+ modes plus the manual tap and jog commands required by the desktop app.
 ******************************************************************************/
 
-// NOTE: This sketch is copied from the legacy Arduino tapper (v8) so NEMESIS can
-// continue to control existing rigs while UNIT1 is developed. Keep behavioural
-// changes minimal; new hardware enhancements should target the UNIT1 project.
+// NOTE: This sketch mirrors the legacy tapper behaviour so existing hardware
+// continues to work during the UNIT1 transition. Keep behavioural changes
+// minimal; target new hardware features at UNIT1 instead.
 
 #include <Arduino.h>
 #include <ctype.h>
@@ -55,6 +36,8 @@ enum class Mode { Idle, Periodic, Random };
 Mode currentMode = Mode::Idle;
 bool motorEnabled = false;
 bool configuredModeIsRandom = false; // Remembers which mode to enter
+bool hostReplayMode = false;         // Host-driven replicant replay
+bool hostReplayActive = false;
 
 // State Tracking for Non-Blocking Debounce
 bool lastSwitchState = HIGH;
@@ -138,13 +121,24 @@ void checkHardwareInputs() {
       lastSwitchDebounceTime = currentTime;
       if (currentSwitchState == HIGH) {
         Serial.println(F("EVENT:SWITCH,ON"));
+        if (hostReplayMode) {
+          if (!hostReplayActive) {
+            hostReplayActive = true;
+            Serial.println(F("EVENT:MODE_ACTIVATED"));
+          }
+        } else if (currentMode == Mode::Idle) {
+          startTimedMode();
+        }
       } else {
         Serial.println(F("EVENT:SWITCH,OFF"));
-      }
-      if (currentSwitchState == HIGH && currentMode == Mode::Idle) {
-        startTimedMode();
-      } else if (currentSwitchState == LOW && currentMode != Mode::Idle) {
-        stopTimedMode();
+        if (hostReplayMode) {
+          if (hostReplayActive) {
+            hostReplayActive = false;
+            Serial.println(F("EVENT:MODE_DEACTIVATED"));
+          }
+        } else if (currentMode != Mode::Idle) {
+          stopTimedMode();
+        }
       }
       lastSwitchState = currentSwitchState;
     }
@@ -240,6 +234,8 @@ void processHostConfig() {
   }
 
   if (modeChar == 'P') {
+    hostReplayMode = false;
+    hostReplayActive = false;
     configuredModeIsRandom = false;
     stepsize = parsedStep;
     if (parsedValue <= 0.0) {
@@ -257,6 +253,8 @@ void processHostConfig() {
       Serial.println(periodicDelayUsFloat / 1000.0, 4);
     }
   } else if (modeChar == 'R') {
+    hostReplayMode = false;
+    hostReplayActive = false;
     configuredModeIsRandom = true;
     stepsize = parsedStep;
     if (parsedValue <= 0.0) {
@@ -266,6 +264,18 @@ void processHostConfig() {
       lambda = parsedValue / 60000.0f;
       Serial.print(F("CONFIG:OK,MODE=R,RATE_PER_MIN="));
       Serial.println(parsedValue, 4);
+    }
+  } else if (modeChar == 'H') {
+    hostReplayMode = true;
+    hostReplayActive = false;
+    configuredModeIsRandom = false;
+    stepsize = parsedStep;
+    Serial.print(F("CONFIG:OK,MODE=H"));
+    if (parsedValue > 0.0) {
+      Serial.print(F(",TAPS="));
+      Serial.println((long)parsedValue);
+    } else {
+      Serial.println();
     }
   } else {
     ok = false;

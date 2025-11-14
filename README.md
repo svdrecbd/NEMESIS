@@ -39,6 +39,7 @@ UI & Workflow
 - **Tabbed navigation:** run/data tabs sit on a left-aligned bar with hover-only close buttons, rename-on-double-click, and Cmd/Ctrl+W / Cmd/Ctrl+Opt+Arrow shortcuts.
 - **Photo‑booth flow:** connect serial (pick from the dropdown), open camera → adjust focus/POV → optionally **Flash Hardware Config** if you just want to exercise the hardware → press **Start Run** when you’re ready to log. Recording is independent from the run.
 - **Timing calibration:** after each periodic run the app compares host vs. controller timing and stores a per-port calibration in `~/.nemesis/calibration.json`; future runs automatically apply the correction so 24 h “ultra” sessions stay aligned with wall-clock time.
+- **Replicant mode:** load any archived `taps.csv` to preview grey dashes in the raster, then replay the taps one-for-one with automatic run shutdown when the script ends.
 - **Sanity check:** if you start a run without recording, you'll be prompted to confirm.
 - **Pro Mode:** keyboard-first interaction (toggle in UI). When ON, some chrome hides for density and single-key controls are active:
   space=manual tap | r=rec on/off | s=run start/stop | e/d=enable/disable |
@@ -87,7 +88,7 @@ Roadmap (short list)
 --------------------
 - Top status line (camera idx/fps • REC • serial • taps • elapsed • rate)
 - FPS/drop monitor HUD and serial RTT
-- Config save/load, reproducible Poisson seed, CSV v2
+- Config save/load, replicant tooling polish, CSV v2
 - ROI-based response detection with review/override UI
 - Export bundle (.zip) of run artifacts
 
@@ -127,4 +128,10 @@ requirements.txt
 
 License & Attribution
 ---------------------
+Developed for the Laboratory of Cell Geometry by Salvador Escobedo.
 Ensure Typestar OCR’s license permits bundling in your distribution. Include license/readme files where appropriate.
+
+Acknowledgements
+----------------
+- Legacy tap workflow by Wallace Marshall with software contributions from Kyle Barlow, Patrick Harrigan, and Salvador Escobedo.
+- Logo by Gabriela Perez.
