@@ -24,7 +24,7 @@ from app.core.logger import APP_LOGGER, RunLogger, TrackingLogger, configure_fil
 from app.core.session import RunSession
 from app.core.version import APP_VERSION
 from app.core.workers import FrameWorker, ProcessCVWorker, RenderWorker
-from app.core.paths import RUNS_DIR, LOGO_PATH, BASE_DIR
+from app.core.paths import RUNS_DIR, LOGO_PATH
 from app.core.resources import ResourceRegistry
 
 from app.ui.theme import (
@@ -110,6 +110,8 @@ STEPSIZE_OPTIONS = [
     "5 (1/16 Step)",
 ]
 RUN_DIR_CREATE_RETRIES = 5
+GITHUB_README_URL = "https://github.com/svdrecbd/NEMESIS"
+CALIFORNIA_NUMERICS_URL = "https://www.californianumerics.com/nemesis/"
 MIN_TIMER_DELAY_MS = 1
 SECONDS_PER_MIN = 60.0
 MS_PER_SEC = 1000.0
@@ -207,43 +209,58 @@ class RunTab(QWidget):
                 pass
 
     def _refresh_branding_styles(self):
+        palette = self._theme if hasattr(self, "_theme") and self._theme else active_theme()
+        accent = palette.get("ACCENT", ACCENT)
+        text = palette.get("TEXT", TEXT)
+        subtxt = palette.get("SUBTXT", SUBTXT)
+        current_year = time.localtime().tm_year
         if hasattr(self, "logo_footer") and self.logo_footer:
             if self.logo_footer.pixmap() is None:
                 try:
-                    self.logo_footer.setStyleSheet(f"color: {ACCENT}; font-size: 16pt; font-weight: bold;")
+                    self.logo_footer.setStyleSheet(f"color: {accent}; font-size: 16pt; font-weight: bold;")
                 except Exception:
                     pass
         if hasattr(self, "logo_tagline") and self.logo_tagline:
             try:
+                self.logo_tagline.setText(
+                    f'© {current_year} <a href="{CALIFORNIA_NUMERICS_URL}" '
+                    f'style="color: {text}; text-decoration: none;">California Numerics</a>'
+                )
                 self.logo_tagline.setStyleSheet(
-                    f"color: {TEXT}; font-size: 10pt; font-weight: normal;"
+                    f"color: {text}; font-size: 10pt; font-weight: normal;"
                 )
             except Exception:
                 pass
         if hasattr(self, "replicant_status") and self.replicant_status:
             try:
-                self.replicant_status.setStyleSheet(f"color: {SUBTXT};")
+                self.replicant_status.setStyleSheet(f"color: {subtxt};")
             except Exception:
                 pass
 
     def _refresh_recording_indicator(self):
         if not hasattr(self, "rec_indicator"):
             return
+        palette = self._theme if hasattr(self, "_theme") and self._theme else active_theme()
+        danger = palette.get("DANGER", DANGER)
+        subtxt = palette.get("SUBTXT", SUBTXT)
         if getattr(self, "_recording_active", False):
             try:
                 self.rec_indicator.setText("● REC ON")
-                self.rec_indicator.setStyleSheet(f"color:{DANGER}; font-weight:bold;")
+                self.rec_indicator.setStyleSheet(f"color:{danger}; font-weight:bold;")
             except Exception:
                 pass
         else:
             try:
                 self.rec_indicator.setText("● REC OFF")
-                self.rec_indicator.setStyleSheet(f"color:{SUBTXT};")
+                self.rec_indicator.setStyleSheet(f"color:{subtxt};")
             except Exception:
                 pass
 
     def _apply_theme_to_widgets(self):
         theme = self._theme
+        bg = theme.get("BG", BG)
+        plot_face = theme.get("PLOT_FACE", bg)
+        border = theme.get("BORDER", BORDER)
         try:
             self.video_view.set_theme(theme)
         except Exception:
@@ -258,7 +275,9 @@ class RunTab(QWidget):
             pass
         if hasattr(self, "chart_frame") and self.chart_frame:
             try:
-                self.chart_frame.setStyleSheet(f"background: {BG}; border: 1px solid {BORDER};")
+                self.chart_frame.setStyleSheet(
+                    f"background: {plot_face}; border: {CHART_FRAME_BORDER_PX}px solid {border};"
+                )
             except Exception:
                 pass
         try:
@@ -274,7 +293,7 @@ class RunTab(QWidget):
                 continue
             try:
                 pal = pane.palette()
-                pal.setColor(pane.backgroundRole(), QColor(BG))
+                pal.setColor(pane.backgroundRole(), QColor(bg))
                 pane.setPalette(pal)
             except Exception:
                 pass
@@ -363,7 +382,7 @@ class RunTab(QWidget):
     def _update_mirror_layout(self):
         split = getattr(self, "splitter", None)
         left = getattr(self, "_left_widget", None)   # Video pane
-        right = getattr(self, "_right_widget", None) # Controls pane
+        right = getattr(self, "_right_scroll", None) # Controls pane (scroll container)
         if split is None or left is None or right is None:
             return
         
@@ -535,7 +554,7 @@ class RunTab(QWidget):
         self.port_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.port_edit.lineEdit().setPlaceholderText("COM3 or /dev/ttyUSB0")
         self._refresh_serial_ports(initial=True)
-        self.serial_btn = QPushButton("Connect Serial")
+        self.serial_btn = QPushButton("Connect")
         self.enable_btn = QPushButton("Enable Motor")
         self.disable_btn = QPushButton("Disable Motor")
         self.tap_btn = QPushButton("Manual Tap")
@@ -549,13 +568,13 @@ class RunTab(QWidget):
         self.cam_index = QSpinBox()
         self.cam_index.setRange(CAMERA_INDEX_MIN, CAMERA_INDEX_MAX)
         self.cam_index.setValue(CAMERA_INDEX_DEFAULT)
-        self.cam_btn = QPushButton("Open Camera")
+        self.cam_btn = QPushButton("Open")
         self.cam_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         # Recording controls (independent)
-        self.rec_start_btn = QPushButton("Start Recording")
+        self.rec_start_btn = QPushButton("Start")
         self.rec_start_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.rec_stop_btn  = QPushButton("Stop Recording")
+        self.rec_stop_btn  = QPushButton("Stop")
         self.rec_stop_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.rec_indicator = QLabel("● REC OFF")
         self._recording_active = False
@@ -641,7 +660,7 @@ class RunTab(QWidget):
         self.flash_config_btn.clicked.connect(self._flash_hardware_config)
 
         # Pro Mode (keyboard-first interaction)
-        self.pro_btn = QPushButton("Pro Mode: OFF")
+        self.pro_btn = QPushButton("PM: OFF")
         self.pro_btn.setCheckable(True)
         self.pro_btn.toggled.connect(self._toggle_pro_mode)
         self.pro_mode = False
@@ -774,10 +793,15 @@ class RunTab(QWidget):
         self.logo_footer.mousePressEvent = self._logo_pressed
 
         current_year = time.localtime().tm_year
-        self.logo_tagline = QLabel(f"© {current_year} California Numerics")
+        self.logo_tagline = QLabel(
+            f'© {current_year} <a href="{CALIFORNIA_NUMERICS_URL}" '
+            f'style="color: {TEXT}; text-decoration: none;">California Numerics</a>'
+        )
         self.logo_tagline.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        self.logo_tagline.setTextFormat(Qt.PlainText)
-        self.logo_tagline.setTextInteractionFlags(Qt.NoTextInteraction)
+        self.logo_tagline.setTextFormat(Qt.RichText)
+        self.logo_tagline.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self.logo_tagline.setOpenExternalLinks(True)
+        self.logo_tagline.setCursor(Qt.PointingHandCursor)
         self.logo_tagline.setStyleSheet(
             f"color: {TEXT}; font-size: 10pt; font-weight: normal;"
         )
@@ -827,18 +851,18 @@ class RunTab(QWidget):
         serial_ctrl_section.addLayout(r1c)
 
         r2 = QHBoxLayout(); r2.addWidget(QLabel("Camera idx:")); r2.addWidget(self.cam_index); r2.addWidget(self.cam_btn)
-        self.popout_btn = QPushButton("Pop-out Preview")
+        self.popout_btn = QPushButton("POP")
         self.popout_btn.setCheckable(True)
         self.popout_btn.setToolTip("Open a floating always-on-top preview window")
         self.popout_btn.toggled.connect(self._toggle_preview_popout)
         self.popout_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         r2.addWidget(self.popout_btn)
         
-        self.show_cv_check = QCheckBox("Show Analysis")
+        self.show_cv_check = QCheckBox("Analogue")
         self.show_cv_check.setToolTip("Overlay Stentor tracking and state classification")
         r2.addWidget(self.show_cv_check)
         
-        self.auto_rec_check = QCheckBox("Auto-Rec")
+        self.auto_rec_check = QCheckBox("Rec")
         self.auto_rec_check.setToolTip("Start recording automatically when run starts")
         r2b = QHBoxLayout(); r2b.addWidget(self.rec_start_btn); r2b.addWidget(self.rec_stop_btn); r2b.addWidget(self.rec_indicator); r2b.addWidget(self.auto_rec_check)
         camera_section = QVBoxLayout()
@@ -1171,12 +1195,16 @@ class RunTab(QWidget):
         )
         menu.addAction(action_open_runs)
 
-        readme_path = (BASE_DIR / "README.md").resolve()
         action_open_readme = QAction("Open README", menu)
         action_open_readme.triggered.connect(
-            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(readme_path)))
+            lambda: QDesktopServices.openUrl(QUrl(GITHUB_README_URL))
         )
         menu.addAction(action_open_readme)
+        action_open_cn = QAction("California Numerics", menu)
+        action_open_cn.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl(CALIFORNIA_NUMERICS_URL))
+        )
+        menu.addAction(action_open_cn)
         return menu
 
     def _logo_pressed(self, event):
@@ -1184,7 +1212,11 @@ class RunTab(QWidget):
         if not menu:
             return
         try:
-            menu.exec(QCursor.pos())
+            anchor = self.logo_footer.mapToGlobal(self.logo_footer.rect().bottomLeft())
+        except Exception:
+            anchor = QCursor.pos()
+        try:
+            menu.exec(anchor)
         except Exception:
             pass
 
@@ -1496,13 +1528,13 @@ class RunTab(QWidget):
         state = state.lower().strip()
         if state == "connected":
             self.serial_status.setText("Serial connected.")
-            self.serial_btn.setText("Disconnect Serial")
+            self.serial_btn.setText("Disconnect")
         elif state == "waiting":
             self.serial_status.setText("Waiting for device…")
-            self.serial_btn.setText("Disconnect Serial")
+            self.serial_btn.setText("Disconnect")
         else:
             self.serial_status.setText("Serial disconnected.")
-            self.serial_btn.setText("Connect Serial")
+            self.serial_btn.setText("Connect")
 
     def _drain_serial_queue(self):
         link = self.serial
@@ -1661,7 +1693,7 @@ class RunTab(QWidget):
 
     def _toggle_pro_mode(self, enabled: bool):
         self.pro_mode = bool(enabled)
-        self.pro_btn.setText("Pro Mode: ON" if self.pro_mode else "Pro Mode: OFF")
+        self.pro_btn.setText("PM: ON" if self.pro_mode else "PM: OFF")
         self._update_status("Pro mode enabled." if self.pro_mode else "Pro mode disabled.")
 
     def _choose_outdir(self):
@@ -2068,7 +2100,7 @@ class RunTab(QWidget):
             if self._resource_registry is not None and self.session.camera_index is not None:
                 self._resource_registry.release_camera(self, self.session.camera_index)
             self.session.camera_index = None
-            self.cam_btn.setText("Open Camera")
+            self.cam_btn.setText("Open")
             self._update_status("Camera closed.")
             return
 
@@ -2086,7 +2118,7 @@ class RunTab(QWidget):
             return
         self.cap = cap
         self.session.camera_index = index
-        self.cam_btn.setText("Close Camera")
+        self.cam_btn.setText("Close")
         self._start_frame_stream()
         self._update_status(f"Camera {index} opened.")
 
@@ -2231,7 +2263,7 @@ class RunTab(QWidget):
             except Exception:
                 pass
             try:
-                self.serial_btn.setText("Connect Serial")
+                self.serial_btn.setText("Connect")
             except Exception:
                 pass
             self._reset_serial_indicator("disconnected")
