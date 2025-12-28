@@ -1,5 +1,5 @@
 # NEMESIS
-**Non-periodic Event Monitoring & Evaluation of Stimulus-Induced States**
+![NEMESIS Header](assets/images/header.png)
 
 NEMESIS is a specialized desktop application designed for automating habituation experiments on *Stentor coeruleus*. It integrates hardware control, video acquisition, computer vision tracking, and data logging into a unified interface, allowing researchers to conduct precise, long-duration behavioral studies.
 
