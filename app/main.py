@@ -5849,14 +5849,8 @@ class App(QWidget):
             try:
                 limit_min = self.auto_stop_min.value()
                 # Debug print to verify logic
-                # print(f"DEBUG: elapsed={elapsed:.2f}s, limit={limit_min:.2f}min, check={(elapsed/60.0)}")
-                if limit_min > 0 and (elapsed / 60.0) >= limit_min:
-                    print(f"DEBUG: Auto-stop triggered! Elapsed={elapsed/60.0:.4f}m Limit={limit_min}m")
-                    self._stop_run(reason=f"Auto-stop after {limit_min:.1f} min", stop_recording=True)
-                    return
-            except Exception as e:
-                print(f"DEBUG: Auto-stop error: {e}")
-                pass
+                except Exception as e:
+                    pass
         else:
             elapsed = self._last_run_elapsed
         overall_rate = (taps/elapsed*60.0) if elapsed>0 else 0.0

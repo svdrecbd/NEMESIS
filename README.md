@@ -67,6 +67,11 @@ NEMESIS is designed to work with a specific hardware configuration:
 
 Connect the camera and Arduino to the host computer. The application will automatically detect available serial ports and camera indices.
 
+### Power Requirements
+*   **Host Computer**: Standard mains power.
+*   **Arduino**: Powered via USB (5V).
+*   **Stepper Driver (Big Easy Driver)**: Requires an **external 12V DC power supply** (minimum 1A). Do not attempt to power the motor from the Arduino's 5V pin.
+
 ## Usage Guide
 
 ### Running an Experiment
@@ -80,6 +85,11 @@ Switch to a **Data Tab** (via the `+` button) to access the Dashboard.
 *   **Review**: Browse past runs and view summary statistics.
 *   **Visualize**: View raster plots of stimulus events and heatmaps of organism contraction responses.
 *   **Export**: Generate CSV files or raw logs for external analysis.
+
+## Known Issues (Preview)
+*   **Timing Drift**: Long-duration periodic runs (>24h) may experience slight clock drift between the host and firmware timing. The application saves calibration data to mitigate this in subsequent runs.
+*   **Zoom Bounds**: Pinch-to-zoom on some trackpads may feel sensitive; use `Cmd/Ctrl` + `+/-` for precise control.
+*   **Video Encoding**: If recording fails to start, ensure FFmpeg is installed and accessible in your system PATH.
 
 ## License & Attribution
 
