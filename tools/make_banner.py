@@ -14,7 +14,7 @@ def make_banner():
     root = Path(__file__).parent.parent
     font_path = root / "assets/fonts/Typestar OCR Regular.otf"
     logo_path = root / "assets/images/transparent_logo.png"
-    out_path = root / "assets/images/banner.png"
+    out_path = root / "assets/images/header_v2.png"
 
     # Setup Canvas
     img = Image.new("RGBA", (WIDTH, HEIGHT), BG_COLOR)
