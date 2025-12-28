@@ -260,3 +260,58 @@ class StentorTracker:
             return "CONTRACTED", (0, 0, 255) # Red for Contraction event
         else:
             return "UNDETERMINED", (0, 255, 255) # Yellow for Ambiguous/End-on
+
+
+def run_cv_process(shm_name: str, shm_shape: Tuple[int, int, int], 
+                   input_queue: "multiprocessing.Queue", 
+                   output_queue: "multiprocessing.Queue",
+                   stop_event: "multiprocessing.Event"):
+    """
+    Process entry point. Runs in a separate process.
+    """
+    from .shared_mem import SharedMemoryManager
+    import time
+    import queue
+
+    # Initialize Tracker
+    tracker = StentorTracker()
+    
+    # Attach to Shared Memory
+    try:
+        with SharedMemoryManager(shm_name, shm_shape, create=False) as shm:
+            while not stop_event.is_set():
+                try:
+                    # Get next frame task
+                    # task: (frame_idx, timestamp)
+                    task = input_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                
+                if task is None: # Sentinel
+                    break
+                    
+                frame_idx, timestamp = task
+                
+                # Zero-copy read from shared buffer
+                # Note: We must treat this as read-only or copy if we modify it
+                # tracker.process_frame DOES modify (for splits), so we copy for safety here
+                # Optimization: Modify tracker to not need copy if possible, but 
+                # copying a 1280x720 array in memory is still way faster than pickling it.
+                # Actually, process_frame uses cv2.split which creates copies anyway.
+                # So we can pass the view directly if we are careful.
+                frame_view = shm.array
+                
+                try:
+                    results, mask = tracker.process_frame(frame_view, timestamp)
+                    
+                    # We can't send the mask (numpy array) back efficiently without another SHM
+                    # For now, we just skip sending the mask back to keep it fast.
+                    # If we need debug mask in UI, we'd use a second SHM buffer.
+                    output_queue.put((results, frame_idx, timestamp))
+                    
+                except Exception as e:
+                    # Don't crash the worker
+                    print(f"CV Process Error: {e}")
+                    
+    except Exception as e:
+        print(f"CV Process Fatal Error: {e}")
