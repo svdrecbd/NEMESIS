@@ -4,10 +4,10 @@ from pathlib import Path
 def make_banner():
     # Config
     WIDTH = 1280
-    HEIGHT = 640
-    BG_COLOR = "#ffffff"  # Clean white background for GitHub
+    HEIGHT = 480 # Slightly shorter for a header feel
+    BG_COLOR = "#ffffff"
     TEXT_COLOR = "#000000"
-    SUBTEXT_COLOR = "#444444"
+    LINE_COLOR = "#000000"
     
     # Paths
     root = Path(__file__).parent.parent
@@ -19,63 +19,68 @@ def make_banner():
     img = Image.new("RGBA", (WIDTH, HEIGHT), BG_COLOR)
     draw = ImageDraw.Draw(img)
 
-    # Load Assets
+    # 1. Load & Scale Logo (Left Side)
     try:
-        # Scale logo to reasonable size (e.g., 200px high)
         logo = Image.open(logo_path).convert("RGBA")
+        # Target height: 350px with some padding
+        logo_h = 350
         logo_aspect = logo.width / logo.height
-        new_h = 250
-        new_w = int(new_h * logo_aspect)
-        logo = logo.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        logo_w = int(logo_h * logo_aspect)
+        logo = logo.resize((logo_w, logo_h), Image.Resampling.LANCZOS)
+        
+        logo_x = 60
+        logo_y = (HEIGHT - logo_h) // 2
+        img.alpha_composite(logo, (logo_x, logo_y))
     except Exception as e:
         print(f"Error loading logo: {e}")
         return
 
+    # 2. Text Setup
     try:
-        font_title = ImageFont.truetype(str(font_path), 120)
-        font_sub = ImageFont.truetype(str(font_path), 42)
+        font_title = ImageFont.truetype(str(font_path), 110)
+        font_sub = ImageFont.truetype(str(font_path), 44)
     except Exception as e:
         print(f"Error loading font: {e}")
         return
 
-    # Layout
-    # Center everything vertically
-    # Logo top centered
-    # Title below logo
-    # Subtitle below title
+    # Layout Calculations (Right Side)
+    text_start_x = logo_x + logo_w + 60
+    max_text_width = WIDTH - text_start_x - 60
     
-    center_x = WIDTH // 2
-    
-    # Draw Logo
-    logo_y = 60
-    logo_x = center_x - (new_w // 2)
-    img.alpha_composite(logo, (logo_x, logo_y))
-
-    # Draw Title "NEMESIS"
     title_text = "NEMESIS"
-    # Get text bounding box
-    bbox = draw.textbbox((0, 0), title_text, font=font_title)
-    text_w = bbox[2] - bbox[0]
-    text_x = center_x - (text_w // 2)
-    text_y = logo_y + new_h + 20
-    draw.text((text_x, text_y), title_text, font=font_title, fill=TEXT_COLOR)
-
-    # Draw Subtitle
-    sub_text = "Non-periodic Event Monitoring & Evaluation of Stimulus-Induced States"
-    # Wrap subtitle if too long? 1280 is pretty wide, it might fit.
-    # Check width
-    s_bbox = draw.textbbox((0, 0), sub_text, font=font_sub)
-    s_w = s_bbox[2] - s_bbox[0]
+    full_subtitle = "Non-periodic Event Monitoring & \nEvaluation of Stimulus-Induced States"
     
-    if s_w > WIDTH - 100:
-        # Simple split if needed, but let's assume it fits or scale down
-        font_sub = ImageFont.truetype(str(font_path), 32)
-        s_bbox = draw.textbbox((0, 0), sub_text, font=font_sub)
-        s_w = s_bbox[2] - s_bbox[0]
-
-    s_x = center_x - (s_w // 2)
-    s_y = text_y + 140
-    draw.text((s_x, s_y), sub_text, font=font_sub, fill=SUBTEXT_COLOR)
+    # Calculate Vertical positioning
+    # Measure Title
+    t_bbox = draw.textbbox((0, 0), title_text, font=font_title)
+    title_h = t_bbox[3] - t_bbox[1]
+    
+    # Measure Subtitle (multiline)
+    line_spacing = 10
+    s_bbox = draw.multiline_textbbox((0, 0), full_subtitle, font=font_sub, spacing=line_spacing)
+    subtitle_h = s_bbox[3] - s_bbox[1]
+    
+    separator_padding = 20
+    separator_h = 4
+    
+    total_content_h = title_h + separator_padding + separator_h + separator_padding + subtitle_h
+    start_y = (HEIGHT - total_content_h) // 2 - 10 # Slight visual bias up
+    
+    # 3. Draw Elements
+    
+    # Title
+    draw.text((text_start_x, start_y), title_text, font=font_title, fill=TEXT_COLOR)
+    
+    # Separator Line
+    line_y = start_y + title_h + separator_padding
+    # Line width matches the width of the longest subtitle line or title, whichever is wider?
+    # Or just fill the remaining space? Let's match the subtitle width for tidiness
+    line_width = max(t_bbox[2]-t_bbox[0], s_bbox[2]-s_bbox[0]) + 20
+    draw.line([(text_start_x, line_y), (text_start_x + line_width, line_y)], fill=LINE_COLOR, width=separator_h)
+    
+    # Subtitle
+    sub_y = line_y + separator_h + separator_padding
+    draw.multiline_text((text_start_x, sub_y), full_subtitle, font=font_sub, fill=TEXT_COLOR, spacing=line_spacing)
 
     # Save
     img.save(out_path)
