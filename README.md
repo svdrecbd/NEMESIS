@@ -93,9 +93,16 @@ Switch to a **Data Tab** (via the `+` button) to access the Dashboard.
 
 ## License & Attribution
 
-Developed for the Laboratory of Cell Geometry by Salvador Escobedo.
+
+
+Developed for the Laboratory of Cell Geometry by Salvador Escobedo. Licensed under the Apache License, Version 2.0.
+
+
 
 **Acknowledgements**
-Legacy tap workflow established by Wallace Marshall.
-Software contributions from Kyle Barlow, Patrick Harrigan, and Salvador Escobedo.
-Logo design by Gabriela Perez.
+
+*   Legacy tap workflow established by Wallace Marshall.
+
+*   Software contributions from Kyle Barlow, Patrick Harrigan, and Salvador Escobedo.
+
+*   Logo design by Gabriela Perez.
