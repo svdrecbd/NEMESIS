@@ -11,29 +11,41 @@ NEMESIS is built with **PySide6 (Qt)** and follows a modular design to support s
 
 *   **Tabbed Workspace**: The main window (`app/main.py`) manages a list of tabs. Each tab acts as an isolated sandbox for a specific experimental rig or data view.
 *   **RunSession**: Encapsulates the state of a live experiment, including the camera connection, serial link, active loggers, and hardware workers. This isolation ensures that a hardware failure in one tab does not affect others.
-*   **Workers**: Heavy operations run in background threads to keep the UI responsive.
-    *   `FrameWorker`: Handles video capture.
-    *   `CVWorker`: Runs the computer vision pipeline (`cvbot.py`).
-    *   `SerialLink`: Manages communication with the Arduino.
+*   **Multiprocessing Engine**: To ensure a responsive UI on high-resolution displays, heavy computational tasks run in separate processes.
+    *   **FrameWorker**: Runs in a thread, captures video frames, and writes them to a **Shared Memory Ring Buffer**.
+    *   **ProcessCVWorker**: Manages a separate OS process (`run_cv_process`) that reads frames directly from RAM (Zero-Copy) to perform tracking analysis without blocking the main application loop (GIL-free).
 
 ### Directory Structure
 
 ```text
 run.py                     # Application entry point
 app/
-  main.py                  # UI logic and main application loop
+  main.py                  # Entry point & Window Manager
   core/
     analyzer.py            # Post-run data correlation
-    cvbot.py               # Computer vision tracking logic
+    cvbot.py               # Computer vision tracking logic (Process entry point)
     logger.py              # CSV logging implementation
-    plotter.py             # Matplotlib integration
+    paths.py               # Path resolution & constants
+    plotter.py             # Matplotlib data-free plotting
+    runlib.py              # Run metadata management
     scheduler.py           # Stimulus timing logic
-    session.py             # State container
-    video.py               # Video recording wrapper
+    session.py             # State container (RunSession)
+    shared_mem.py          # SharedMemoryManager for zero-copy IPC
+    video.py               # Video capture & recording
+    workers.py             # Background workers (FrameWorker, ProcessCVWorker)
   drivers/                 # Hardware interface layers
-  ui/                      # Qt resources
+  ui/                      # UI Components
+    tabs/                  # Major application tabs
+      dashboard.py         # Data analysis & review tab
+      run_tab.py           # Live experiment control tab
+    widgets/               # Reusable widgets
+      chart.py             # LiveChart (Matplotlib wrapper)
+      containers.py        # Layout helpers (AspectRatio, TabBar)
+      viewer.py            # Video preview (ZoomView)
+    theme.py               # Styling & Palette definitions
 assets/                    # Static assets (fonts, images)
 firmware/                  # Arduino source code
+tests/                     # Pytest suite
 ```
 
 ## Data Pipeline
@@ -74,6 +86,11 @@ Follow the installation steps in the README. Ensure you have the project require
 *   **Type Hinting**: Use Python type hints for all function signatures.
 *   **Logging**: Use `APP_LOGGER` from `app.core.logger` instead of `print`.
 *   **Conventions**: Follow existing naming conventions (snake_case for functions/variables, PascalCase for classes).
+
+### Testing
+The project includes a comprehensive test suite using `pytest`.
+*   **Run All Tests**: `export PYTHONPATH=$PYTHONPATH:. && python -m pytest tests/`
+*   **Coverage**: Includes Unit Tests for CV logic, Drivers (mocked), and State management.
 
 ### Debugging
 *   **Pro Mode**: Toggle in the UI to enable keyboard shortcuts for rapid testing.
