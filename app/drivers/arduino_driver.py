@@ -27,6 +27,7 @@ class SerialLink(ControllerDriver):
         buf = bytearray()
         while not self._stop.is_set():
             try:
+                # ser.read can raise OSError/SerialException if unplugged
                 b = self.ser.read(1) if self.ser else b''
                 if not b:
                     time.sleep(0.005); continue
@@ -39,8 +40,10 @@ class SerialLink(ControllerDriver):
                             buf.clear()
                 else:
                     buf.extend(b)
-            except Exception:
-                time.sleep(0.05)
+            except Exception as e:
+                # Report error and stop reading to avoid spinning
+                self._rx_queue.put((time.monotonic(), f"ERROR:Serial read failed: {e}"))
+                break
 
     def is_open(self) -> bool:
         return bool(self.ser and self.ser.is_open)
@@ -51,24 +54,25 @@ class SerialLink(ControllerDriver):
             self._rx_thread.join(timeout=0.5)
             self._rx_thread = None
         if self.ser:
-            try:
-                self.ser.close()
-            finally:
-                self.ser = None
+            self.ser.close()
+            self.ser = None
 
-    def send_char(self, ch: str):
-        self.send_text(ch[:1])
+    def send_char(self, ch: str) -> bool:
+        return self.send_text(ch[:1])
 
-    def send_text(self, text: str):
+    def send_text(self, text: str) -> bool:
         if not self.is_open():
-            return
+            return False
         data = text.encode('ascii', errors='ignore')
         if not data:
-            return
+            return False
         try:
             self.ser.write(data)
-        except Exception:
-            pass
+            return True
+        except Exception as e:
+            # If write fails, likely disconnected.
+            self._rx_queue.put((time.monotonic(), f"ERROR:Serial write failed: {e}"))
+            return False
 
     def read_line_nowait(self, with_timestamp: bool = False):
         try:

@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional, List
+from app.core.logger import APP_LOGGER
 
 RUN_PREFIX = "run_"
 
@@ -22,7 +23,8 @@ def load_run_json(run_dir: Path) -> dict:
         try:
             with metadata_path.open("r", encoding="utf-8") as fh:
                 return json.load(fh)
-        except Exception:
+        except Exception as e:
+            APP_LOGGER.error(f"Failed to load run.json from {run_dir}: {e}")
             return {}
     return {}
 
@@ -69,7 +71,8 @@ class RunSummary:
             with taps_path.open("r", encoding="utf-8", newline="") as fh:
                 reader = csv.DictReader(fh)
                 rows = list(reader)
-        except Exception:
+        except Exception as e:
+            APP_LOGGER.error(f"Failed to read taps.csv from {taps_path}: {e}")
             return
         if not rows:
             return
@@ -78,7 +81,8 @@ class RunSummary:
             first = float(rows[0]["t_host_ms"]) / 1000.0
             last = float(rows[-1]["t_host_ms"]) / 1000.0
             self.duration_s = max(0.0, last - first)
-        except Exception:
+        except Exception as e:
+            APP_LOGGER.error(f"Failed to calculate run duration for {self.run_id}: {e}")
             self.duration_s = None
 
 
@@ -93,7 +97,8 @@ class RunLibrary:
         for run_dir in iter_run_dirs(self.base):
             try:
                 summaries.append(RunSummary.from_dir(run_dir))
-            except Exception:
+            except Exception as e:
+                APP_LOGGER.error(f"Failed to load run summary from {run_dir}: {e}")
                 continue
         return summaries
 
@@ -109,7 +114,8 @@ class RunLibrary:
                             child.rmdir()
                     run_dir.rmdir()
                     return True
-                except Exception:
+                except Exception as e:
+                    APP_LOGGER.error(f"Failed to delete run directory {run_dir}: {e}")
                     return False
         return False
 

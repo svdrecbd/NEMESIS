@@ -17,9 +17,14 @@ class RunSession:
     serial: SerialLink = field(default_factory=SerialLink)
 
     logger: Optional[object] = None  # Set to RunLogger at runtime
+    tracking_logger: Optional[object] = None # Set to TrackingLogger at runtime
     run_dir: Optional[str] = None
     run_start: Optional[float] = None
     taps: int = 0
+    
+    # CV State
+    cv_results: list = field(default_factory=list) # List of StentorState
+    cv_mask: Optional[object] = None # Debug mask image
 
     hardware_run_active: bool = False
     awaiting_switch_start: bool = False

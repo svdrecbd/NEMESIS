@@ -11,11 +11,12 @@ from PySide6.QtWidgets import (
     QLineEdit, QMessageBox, QSizePolicy, QListView, QSplitter, QStyleFactory, QFrame, QSpacerItem,
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsProxyWidget, QSplitterHandle, QMenu,
     QGraphicsOpacityEffect, QTabWidget, QListWidget, QListWidgetItem, QInputDialog, QTabBar, QToolButton,
-    QStyleOptionTab, QStyle, QScrollArea, QStylePainter, QAbstractItemView
+    QStyleOptionTab, QStyle, QScrollArea, QStylePainter, QAbstractItemView, QDialog, QPlainTextEdit,
+    QCheckBox, QProgressDialog
 )
 from PySide6.QtCore import (
     QTimer, Qt, QEvent, QSize, Signal, QObject, Slot, QUrl, QPoint,
-    QPropertyAnimation, QEasingCurve, QAbstractAnimation, QRect
+    QPropertyAnimation, QEasingCurve, QAbstractAnimation, QRect, QThread
 )
 from PySide6.QtGui import QImage, QPixmap, QFontDatabase, QFont, QIcon, QPainter, QColor, QPen, QDesktopServices, QCursor, QPalette
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -28,18 +29,53 @@ from serial.tools import list_ports
 import shiboken6
 
 # Internal modules
-from .core import video, scheduler, configio
-from .core import logger as runlogger
+from .core import video, scheduler, configio, cvbot
+from .core import logger as runlogger_module
+from .core.logger import APP_LOGGER, TrackingLogger
 from .core.session import RunSession
 from .core.runlib import RunLibrary, RunSummary
+from .core.analyzer import RunAnalyzer
 import shutil
 import cv2
+
+# Function to get resource path for packaged applications (PyInstaller compatibility)
+def _get_resource_path(relative_path: str) -> Path:
+    """Get absolute path to resource, works for dev and for PyInstaller."""
+    try:
+        # PyInstaller creates a temporary folder and stores path in _MEIPASS
+        base_path = Path(sys._MEIPASS)
+    except AttributeError:
+        # Fallback to dev mode: main.py is in app/, so two levels up is project root
+        base_path = Path(__file__).resolve().parent.parent
+    return base_path / relative_path
+
+class CVWorker(QObject):
+    resultsReady = Signal(object, int, float, object) # results, frame_idx, timestamp, mask_image
+    
+    def __init__(self):
+        super().__init__()
+        self.tracker = cvbot.StentorTracker()
+        self._busy = False
+
+    @Slot(object, int, float)
+    def process_frame(self, frame, frame_idx, timestamp):
+        if self._busy:
+            return
+        self._busy = True
+        try:
+            # Run the heavy math
+            results, mask = self.tracker.process_frame(frame, timestamp)
+            self.resultsReady.emit(results, frame_idx, timestamp, mask)
+        except Exception as e:
+            APP_LOGGER.error(f"CV Error: {e}")
+        finally:
+            self._busy = False
 
 HEATMAP_PALETTES = ("inferno", "magma", "cividis", "plasma", "viridis", "turbo")
 
 # Assets & Version
 # Resolve assets relative to the project root, not the current working directory
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = _get_resource_path(".")
 RUNS_DIR = (BASE_DIR / "runs").resolve()
 RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -52,13 +88,13 @@ def _migrate_legacy_run_dirs():
             continue
         try:
             legacy.replace(dest)
-        except Exception:
-            pass
+        except Exception as e:
+            APP_LOGGER.error(f"Failed to migrate legacy run directory {legacy}: {e}")
 
 _migrate_legacy_run_dirs()
-ASSETS_DIR = BASE_DIR / "assets"
-FONT_PATH = ASSETS_DIR / "fonts/Typestar OCR Regular.otf"
-LOGO_PATH = ASSETS_DIR / "images/transparent_logo.png"
+ASSETS_DIR = _get_resource_path("assets")
+FONT_PATH = _get_resource_path("assets/fonts/Typestar OCR Regular.otf")
+LOGO_PATH = _get_resource_path("assets/images/transparent_logo.png")
 FOOTER_LOGO_SCALE = 0.036  # further ~25% shrink keeps footer badge minimal
 APP_VERSION = "1.0-rc1"
 _FONT_FAMILY = None  # set at runtime when font loads
@@ -274,7 +310,8 @@ def build_app_icon() -> QIcon | None:
         for target in (16, 32, 64, 128, 256):
             icon.addPixmap(base_pix.scaled(target, target, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         return icon
-    except Exception:
+    except Exception as e:
+        _log_gui_exception(e, context="build_app_icon")
         return None
 
 def build_stylesheet(font_family: str | None, scale: float = 1.0) -> str:
@@ -348,6 +385,9 @@ def _apply_global_font(app: QApplication):
             _FONT_FAMILY = fams[0]
             app.setFont(QFont(_FONT_FAMILY, 11))
 
+def _log_gui_exception(e: Exception, context: str = "GUI operation") -> None:
+    APP_LOGGER.error(f"Unhandled GUI exception in {context}: {e}", exc_info=True)
+
 def apply_matplotlib_theme(font_family: str | None, theme: dict[str, str]):
     """Make Matplotlib match the NEMESIS UI theme."""
     mpl_family = None
@@ -397,11 +437,13 @@ def _set_macos_titlebar_appearance(widget: QWidget, color: QColor) -> bool:
         return False
     try:
         from ctypes import cdll, util, c_void_p, c_char_p, c_bool, c_double
-    except Exception:
+    except Exception as e:
+        APP_LOGGER.error(f"Failed to import ctypes in _set_macos_titlebar_appearance: {e}")
         return False
     try:
         objc = cdll.LoadLibrary(util.find_library('objc'))
-    except Exception:
+    except Exception as e:
+        APP_LOGGER.error(f"Failed to load objc library in _set_macos_titlebar_appearance: {e}")
         return False
 
     def _cls(name: bytes) -> c_void_p:
@@ -423,7 +465,8 @@ def _set_macos_titlebar_appearance(widget: QWidget, color: QColor) -> bool:
 
     try:
         view = c_void_p(int(widget.winId()))
-    except Exception:
+    except Exception as e:
+        APP_LOGGER.error(f"Failed to get widget window ID in _set_macos_titlebar_appearance: {e}")
         return False
     if not view.value:
         return False
@@ -452,7 +495,8 @@ def _set_macos_titlebar_appearance(widget: QWidget, color: QColor) -> bool:
                         c_double(r), c_double(g), c_double(b), c_double(1.0),
                         restype=c_void_p,
                         argtypes=[c_double, c_double, c_double, c_double])
-    except Exception:
+    except Exception as e:
+        APP_LOGGER.error(f"Error converting QColor to NSColor in _set_macos_titlebar_appearance: {e}")
         ns_color = None
 
     try:
@@ -461,7 +505,8 @@ def _set_macos_titlebar_appearance(widget: QWidget, color: QColor) -> bool:
         _msg(window, _sel(b"setTitlebarAppearsTransparent:"), c_bool(False), restype=None, argtypes=[c_bool])
         if ns_color:
             _msg(window, _sel(b"setBackgroundColor:"), ns_color, restype=None, argtypes=[c_void_p])
-    except Exception:
+    except Exception as e:
+        APP_LOGGER.error(f"Error applying appearance in _set_macos_titlebar_appearance: {e}")
         return False
     return True
 
@@ -478,16 +523,16 @@ class LiveChart:
         # Compact layout and tighter suptitle position to reduce top padding
         try:
             self.fig.subplots_adjust(top=0.82, bottom=0.18, left=0.10, right=0.98, hspace=0.12)
-        except Exception:
-            pass
+        except Exception as e:
+            _log_gui_exception(e, context="LiveChart.__init__ subplots_adjust")
         self.canvas = FigureCanvas(self.fig)
         # Reduce minimum height so the preview keeps priority
         self.canvas.setMinimumHeight(160)
         try:
             # Canvas transparent; outer QFrame draws the border/background
             self.canvas.setStyleSheet("background: transparent;")
-        except Exception:
-            pass
+        except Exception as e:
+            APP_LOGGER.error(f"Error setting canvas stylesheet in LiveChart.__init__: {e}")
         self.times_sec: list[float] = []
         self._time_unit: str = "minutes"
         self._last_max_elapsed_sec: float = 0.0
@@ -510,8 +555,8 @@ class LiveChart:
         try:
             self.fig.patch.set_alpha(0.0)
             self.fig.patch.set_facecolor('none')
-        except Exception:
-            pass
+        except Exception as e:
+            APP_LOGGER.error(f"Error setting figure patch properties in LiveChart._init_axes: {e}")
         self._configure_standard_axes(0.0)
         self.canvas.draw_idle()
 
@@ -693,8 +738,8 @@ class LiveChart:
         try:
             self.fig.subplots_adjust(top=0.82, bottom=0.18, left=0.10, right=0.98, hspace=0.12)
             self.fig.suptitle("Stentor Habituation to Stimuli", fontsize=10, color=text_color, y=0.98)
-        except Exception:
-            pass
+        except Exception as e:
+            APP_LOGGER.error(f"Error adjusting subplots or suptitle in LiveChart._redraw: {e}")
 
     def _configure_long_raster_axes(self, max_elapsed_sec: float) -> None:
         text_color = self.color("TEXT")
@@ -726,8 +771,8 @@ class LiveChart:
         try:
             self.fig.subplots_adjust(top=0.90, bottom=0.10, left=0.10, right=0.98)
             self.fig.suptitle("Tap raster by hour", fontsize=10, color=text_color, y=0.97)
-        except Exception:
-            pass
+        except Exception as e:
+            APP_LOGGER.error(f"Error adjusting subplots or suptitle in LiveChart._redraw (long raster): {e}")
 
     def _configure_long_heatmap_axes(self) -> None:
         text_color = self.color("TEXT")
@@ -755,8 +800,8 @@ class LiveChart:
         try:
             self.fig.subplots_adjust(top=0.90, bottom=0.10, left=0.10, right=0.92)
             self.fig.suptitle("Contraction heatmap", fontsize=10, color=text_color, y=0.97)
-        except Exception:
-            pass
+        except Exception as e:
+            APP_LOGGER.error(f"Error adjusting subplots or suptitle in LiveChart._redraw (long heatmap): {e}")
 
     def _draw_standard_raster(self) -> None:
         text_color = self.color("TEXT")
@@ -896,8 +941,8 @@ class LiveChart:
         data = self.contraction_heatmap
         try:
             self.fig.suptitle(f"Contraction heatmap — {self.heatmap_palette.title()}", fontsize=10, color=text_color, y=0.97)
-        except Exception:
-            pass
+        except Exception as e:
+            APP_LOGGER.error(f"Error setting suptitle in LiveChart._redraw: {e}")
         if data is None or data.size == 0:
             ax.text(
                 0.5,
@@ -1133,10 +1178,8 @@ class ZoomView(QGraphicsView):
         bg_color = theme.get("BG", self._bg_color)
         try:
             self.setBackgroundBrush(QColor(bg_color))
-        except Exception:
-            pass
-        self._bg_color = bg_color
-        self._scrollbar_qss = self._build_scrollbar_qss(theme.get("SCROLLBAR", SCROLLBAR))
+        except Exception as e:
+            APP_LOGGER.error(f"Error setting background brush in ZoomView: {e}")
         try:
             if self._scrollbar_style_applied:
                 self.setStyleSheet(self._base_qss + self._scrollbar_qss)
@@ -1183,8 +1226,8 @@ class ZoomView(QGraphicsView):
             try:
                 self.setStyleSheet(self._base_qss + self._scrollbar_qss)
                 self.viewport().setStyleSheet("background: transparent; border: none;")
-            except Exception:
-                pass
+            except Exception as e:
+                APP_LOGGER.error(f"Error applying scrollbar style in ZoomView.set_image: {e}")
             self._scrollbar_style_applied = True
 
     def reset_first_frame(self):
@@ -1200,8 +1243,8 @@ class ZoomView(QGraphicsView):
             self._has_image = False
             try:
                 self.resetTransform()
-            except Exception:
-                pass
+            except Exception as e:
+                APP_LOGGER.error(f"Error resetting transform in ZoomView.reset_first_frame: {e}")
             self._zoom = 1.0
 
     def _zoom_by(self, factor: float):
@@ -1224,13 +1267,8 @@ class ZoomView(QGraphicsView):
                 val = getattr(ev, 'value', None)
                 if callable(val):
                     val = val()
-                if gtype == Qt.NativeGestureType.Zoom and val is not None:
-                    factor = 1.0 + (float(val) * 0.5)
-                    factor = max(0.7, min(factor, 1.3))
-                    self._zoom_by(factor)
-                    ev.accept()
-                    return True
-            except Exception:
+            except Exception as e:
+                APP_LOGGER.error(f"Error processing NativeGesture in ZoomView.event: {e}")
                 pass
         # Cross-platform: QPinchGesture via gesture events
         if ev.type() == QEvent.Gesture:
@@ -1244,7 +1282,8 @@ class ZoomView(QGraphicsView):
                         self._zoom_by(float(sf))
                         ev.accept()
                         return True
-            except Exception:
+            except Exception as e:
+                APP_LOGGER.error(f"Error processing QEvent.Gesture in ZoomView.event: {e}")
                 pass
         return super().event(ev)
 
@@ -1360,348 +1399,11 @@ class PinnedPreviewWindow(QWidget):
         super().closeEvent(event)
 
 
-class GuideSplitterHandle(QSplitterHandle):
-    def __init__(self, orientation: Qt.Orientation, parent=None, theme: dict[str, str] | None = None):
-        super().__init__(orientation, parent)
-        self.setCursor(Qt.SplitHCursor if orientation == Qt.Horizontal else Qt.SplitVCursor)
-        self._theme = theme or active_theme()
-        self._apply_theme()
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, False)
-        rect = self.rect()
-        painter.fillRect(rect, QColor(self._theme.get("BG", BG)))
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(self._theme.get("BG", BG)))
-        painter.drawRect(rect)
-        splitter = self.splitter()
-        active_idx = getattr(splitter, "_active_handle_index", None) if splitter else None
-        match_idx = None
-        if splitter and active_idx is not None:
-            try:
-                for i in range(1, splitter.count()):
-                    if splitter.handle(i) is self:
-                        match_idx = i
-                        break
-            except Exception:
-                match_idx = None
-        if active_idx is not None and match_idx == active_idx:
-            pen = QPen(QColor(self._theme.get("ACCENT", ACCENT)))
-            pen.setStyle(Qt.CustomDashLine)
-            pen.setDashPattern([1, 4])
-            pen.setCosmetic(True)
-            pen.setCapStyle(Qt.FlatCap)
-            pen.setWidth(1)
-            painter.setPen(pen)
-            if self.orientation() == Qt.Horizontal:
-                x = rect.center().x()
-                painter.drawLine(int(x), rect.top(), int(x), rect.bottom())
-            else:
-                y = rect.center().y()
-                painter.drawLine(rect.left(), int(y), rect.right(), int(y))
-
-    def sizeHint(self):
-        base = super().sizeHint()
-        splitter = self.splitter()
-        width = max(1, splitter.handleWidth() if splitter else base.width())
-        if self.orientation() == Qt.Horizontal:
-            return QSize(width, base.height())
-        return QSize(base.width(), width)
-
-    def mouseMoveEvent(self, e):
-        super().mouseMoveEvent(e)
-        splitter = self.splitter()
-        if splitter:
-            try:
-                splitter.setRubberBand(-1)
-            except Exception:
-                pass
-
-    def mouseReleaseEvent(self, e):
-        super().mouseReleaseEvent(e)
-        splitter = self.splitter()
-        if not splitter:
-            return
-        try:
-            splitter.setRubberBand(-1)
-        except Exception:
-            pass
-        if hasattr(splitter, "_pane_records"):
-            panes = splitter._pane_records()
-            if len(panes) >= 2:
-                _, _, left_now = panes[0]
-                _, _, right_now = panes[1]
-                total = left_now + right_now
-                target_ratio, clamped_px = splitter._nearest_feasible_target(left_now)
-                if target_ratio is not None and clamped_px is not None and total > 0:
-                    try:
-                        splitter.blockSignals(True)
-                        splitter._apply_pane_sizes(clamped_px, total - clamped_px)
-                    finally:
-                        splitter.blockSignals(False)
-                    handle_index = splitter._pane_handle_index()
-                    splitter._set_active_ratio(target_ratio, handle_index if handle_index is not None else 0)
-                    splitter.update()
-        QTimer.singleShot(450, lambda: splitter._clear_active_ratio() if hasattr(splitter, "_clear_active_ratio") else None)
-
-    def _apply_theme(self):
-        base_color = QColor(self._theme.get("BG", BG))
-        self._base = base_color
-        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
-        self.setAutoFillBackground(True)
-        pal = self.palette()
-        pal.setColor(self.backgroundRole(), base_color)
-        self.setPalette(pal)
-        self.update()
-
-    def set_theme(self, theme: dict[str, str]):
-        self._theme = theme or active_theme()
-        self._apply_theme()
-
-
-class GuideSplitter(QSplitter):
-    def __init__(self, orientation: Qt.Orientation, parent=None, *, snap_targets=None, snap_tolerance: float = 0.03, theme: dict[str, str] | None = None):
-        super().__init__(orientation, parent)
-        self._snap_targets = sorted(snap_targets or (0.25, 0.5, 0.75))
-        self._snap_tolerance = float(max(0.005, snap_tolerance))
-        self._active_ratio: float | None = None
-        self._active_handle_index: int | None = None
-        self._theme = theme or active_theme()
-        # Live resize with no rubber-band painter
-        self.setOpaqueResize(True)
-        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
-        self.setAutoFillBackground(True)
-        self._apply_theme()
-        try:
-            self.setRubberBand(-1)
-        except Exception:
-            pass
-        self._flash_timer = QTimer(self)
-        self._flash_timer.setSingleShot(True)
-        self._flash_timer.timeout.connect(self._clear_active_ratio)
-        try:
-            self.splitterMoved.connect(self._on_splitter_moved)
-        except Exception:
-            pass
-
-    def _apply_theme(self):
-        bg = self._theme.get("BG", BG)
-        pal = self.palette()
-        pal.setColor(self.backgroundRole(), QColor(bg))
-        self.setPalette(pal)
-        try:
-            self.setStyleSheet(
-                f"QSplitter {{ background: {bg}; }}"
-                "QSplitter::handle { background: transparent; border: none; image: none; }"
-                "QSplitter::rubberBand { background: transparent; border: none; }"
-            )
-        except Exception:
-            pass
-        for idx in range(1, self.count()):
-            handle = self.handle(idx)
-            if isinstance(handle, GuideSplitterHandle):
-                handle.set_theme(self._theme)
-
-    def set_theme(self, theme: dict[str, str]):
-        self._theme = theme or active_theme()
-        self._apply_theme()
-        self.update()
-
-    def createHandle(self):
-        return GuideSplitterHandle(self.orientation(), self, theme=self._theme)
-
-    # --- Internal helpers -------------------------------------------------
-    def _pane_records(self) -> list[tuple[int, QWidget, int]]:
-        """Return [(index, widget, size)] for managed panes (skips overlay label)."""
-        records: list[tuple[int, QWidget, int]] = []
-        sizes = QSplitter.sizes(self)
-        count = QSplitter.count(self)
-        for idx in range(count):
-            w = QSplitter.widget(self, idx)
-            if w is None:
-                continue
-            size = sizes[idx] if idx < len(sizes) else 0
-            records.append((idx, w, size))
-        return records
-
-    def _pane_handle_index(self) -> int | None:
-        panes = self._pane_records()
-        if len(panes) < 2:
-            return None
-        # Handle index matches the index of the pane on its right
-        return panes[1][0]
-
-    def set_pane_sizes(self, sizes: Sequence[int]) -> None:
-        panes = self._pane_records()
-        if not panes or not sizes:
-            return
-        full = QSplitter.sizes(self)
-        for (idx, _, _), value in zip(panes, sizes):
-            needed_len = idx + 1
-            if len(full) < needed_len:
-                full.extend([0] * (needed_len - len(full)))
-            full[idx] = max(0, int(round(value)))
-        QSplitter.setSizes(self, full)
-
-    def _apply_pane_sizes(self, left_px: int, right_px: int) -> None:
-        self.set_pane_sizes([left_px, right_px])
-
-    def _on_splitter_moved(self, pos: int, index: int):
-        try:
-            self.setRubberBand(-1)
-        except Exception:
-            pass
-        QTimer.singleShot(0, lambda: self._maybe_snap(self.handle(index)))
-
-    def mouseReleaseEvent(self, e):
-        super().mouseReleaseEvent(e)
-        try:
-            self.setRubberBand(-1)
-        except Exception:
-            pass
-        handle_index = 1 if self.count() > 1 else 0
-        QTimer.singleShot(0, lambda: self._maybe_snap(self.handle(handle_index)))
-
-    def _nearest_feasible_target(self, current_left: int) -> tuple[float | None, int | None]:
-        panes = self._pane_records()
-        if len(panes) < 2:
-            return None, None
-        _, left_widget, left_now = panes[0]
-        _, right_widget, right_now = panes[1]
-        total = left_now + right_now
-        if total <= 0:
-            return None, None
-        if self.orientation() == Qt.Horizontal:
-            min_left = left_widget.minimumWidth() if left_widget else 0
-            min_right = right_widget.minimumWidth() if right_widget else 0
-        else:
-            min_left = left_widget.minimumHeight() if left_widget else 0
-            min_right = right_widget.minimumHeight() if right_widget else 0
-
-        best_ratio: float | None = None
-        best_px: int | None = None
-        best_delta = float("inf")
-        for target in self._snap_targets:
-            raw_px = int(round(total * target))
-            clamped_px = max(min_left, min(raw_px, total - min_right))
-            delta = abs(current_left - clamped_px)
-            if delta < best_delta:
-                best_delta = delta
-                best_ratio = target
-                best_px = clamped_px
-        return best_ratio, best_px
-
-    def _maybe_snap(self, handle: QSplitterHandle | None = None):
-        panes = self._pane_records()
-        if len(panes) < 2:
-            self._clear_active_ratio()
-            return
-
-        left_idx, left_widget, left_now = panes[0]
-        right_idx, right_widget, right_now = panes[1]
-        total = left_now + right_now
-        if total <= 0:
-            self._clear_active_ratio()
-            return
-
-        if self.orientation() == Qt.Horizontal:
-            min_left = left_widget.minimumWidth() if left_widget else 0
-            min_right = right_widget.minimumWidth() if right_widget else 0
-        else:
-            min_left = left_widget.minimumHeight() if left_widget else 0
-            min_right = right_widget.minimumHeight() if right_widget else 0
-
-        scale = self.devicePixelRatioF() if hasattr(self, "devicePixelRatioF") else 1.0
-        handle_px = max(1, int(round(self.handleWidth() * scale)))
-        px_tol = max(handle_px + 2, int(round(total * self._snap_tolerance)))
-        snapped_ratio = None
-        for target in self._snap_targets:
-            raw_px = int(round(total * target))
-            clamped_px = max(min_left, min(raw_px, total - min_right))
-            if abs(left_now - clamped_px) > px_tol:
-                continue
-            try:
-                self.blockSignals(True)
-                self._apply_pane_sizes(clamped_px, total - clamped_px)
-            finally:
-                self.blockSignals(False)
-            refreshed = self._pane_records()
-            if len(refreshed) < 2:
-                continue
-            new_left = refreshed[0][2]
-            new_right = refreshed[1][2]
-            new_total = max(1, new_left + new_right)
-            actual = new_left / new_total
-            if (abs(actual - target) <= self._snap_tolerance * 1.2) or (clamped_px != raw_px):
-                snapped_ratio = target
-            break
-
-        if snapped_ratio is not None:
-            handle_index = self._pane_handle_index()
-            self._set_active_ratio(snapped_ratio, handle_index if handle_index is not None else 0)
-            self.update()
-        else:
-            self._clear_active_ratio()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if self._active_ratio is not None:
-            self.update()
-
-    def _set_active_ratio(self, ratio: float, handle_index: int):
-        self._active_ratio = ratio
-        self._active_handle_index = handle_index
-        self._flash_timer.start(450)
-        self.update()
-        handle = self.handle(handle_index)
-        if handle:
-            handle.update()
-
-    def _clear_active_ratio(self):
-        if self._active_ratio is None:
-            return
-        handle_index = self._active_handle_index
-        self._active_ratio = None
-        self._active_handle_index = None
-        self._flash_timer.stop()
-        self.update()
-        if handle_index is not None:
-            handle = self.handle(handle_index)
-            if handle:
-                handle.update()
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        if self._active_ratio is None:
-            return
-        if self._active_handle_index is None:
-            return
-        handle = self.handle(self._active_handle_index)
-        if not handle:
-            return
-        geo = handle.geometry()
-        center = geo.center()
-        painter = QPainter(self)
-        accent = QColor(self._theme.get("ACCENT", ACCENT))
-        pen = QPen(accent)
-        pen.setStyle(Qt.CustomDashLine)
-        pen.setDashPattern([2, 4])
-        pen.setCapStyle(Qt.FlatCap)
-        pen.setCosmetic(True)
-        pen.setWidth(1)
-        painter.setPen(pen)
-        painter.setRenderHint(QPainter.Antialiasing, False)
-        if self.orientation() == Qt.Horizontal:
-            x = center.x()
-            painter.drawLine(int(x), 0, int(x), self.height())
-        else:
-            y = center.y()
-            painter.drawLine(0, int(y), self.width(), int(y))
 
 
 class FrameWorker(QObject):
-    frameReady = Signal(object)
+    frameReady = Signal(object, int, float)
     error = Signal(str)
     stopped = Signal()
 
@@ -1711,6 +1413,7 @@ class FrameWorker(QObject):
         self._interval_s = max(0.005, float(interval_ms) / 1000.0)
         self._running = False
         self._thread: threading.Thread | None = None
+        self._frame_idx = 0
 
     def _emit_safe(self, signal, *args):
         if not shiboken6.isValid(self):
@@ -1723,26 +1426,29 @@ class FrameWorker(QObject):
     def _loop(self):
         interval = self._interval_s
         next_tick = time.perf_counter()
-        try:
-            while self._running:
-                try:
-                    ok, frame = self._capture.read()
-                except Exception as exc:
-                    self._emit_safe(self.error, f"Camera error: {exc}")
-                    break
-                if ok and frame is not None:
-                    self._emit_safe(self.frameReady, frame)
-                if interval > 0:
-                    next_tick += interval
-                    sleep_for = next_tick - time.perf_counter()
-                    if sleep_for > 0:
-                        time.sleep(sleep_for)
-                    else:
-                        next_tick = time.perf_counter()
-        finally:
-            self._running = False
-            self._thread = None
-            self._emit_safe(self.stopped)
+        while self._running:
+            try:
+                ok, frame = self._capture.read()
+            except Exception as exc:
+                self._emit_safe(self.error, f"Camera error: {exc}")
+                break
+            
+            ts = time.monotonic()
+            if ok and frame is not None:
+                self._frame_idx += 1
+                self._emit_safe(self.frameReady, frame, self._frame_idx, ts)
+            
+            if interval > 0:
+                next_tick += interval
+                sleep_for = next_tick - time.perf_counter()
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+                else:
+                    next_tick = time.perf_counter()
+        
+        self._running = False
+        self._thread = None
+        self._emit_safe(self.stopped)
 
     @Slot()
     def start(self):
@@ -2390,27 +2096,16 @@ class RunTab(QWidget):
 
     def _update_mirror_layout(self):
         split = getattr(self, "splitter", None)
-        left = getattr(self, "_left_widget", None)
-        right = getattr(self, "_right_widget", None)
+        left = getattr(self, "_left_widget", None)   # Video pane
+        right = getattr(self, "_right_widget", None) # Controls pane
         if split is None or left is None or right is None:
             return
+        
+        # Mirror mode: Controls (right) | Video (left)
+        # Normal mode: Video (left) | Controls (right)
         desired = (right, left) if self._mirror_mode else (left, right)
-        try:
-            current_sizes = split.sizes()
-        except Exception:
-            current_sizes = []
-        current_order: list[QWidget] = []
-        try:
-            for i in range(split.count()):
-                widget = split.widget(i)
-                if widget is not None:
-                    current_order.append(widget)
-        except Exception:
-            current_order = []
-        size_map: dict[QWidget, int] = {}
-        for idx, widget in enumerate(current_order):
-            if idx < len(current_sizes):
-                size_map[widget] = current_sizes[idx]
+        
+        # Reorder widgets if needed
         for idx, widget in enumerate(desired):
             current_idx = split.indexOf(widget)
             if current_idx == -1 or current_idx == idx:
@@ -2420,23 +2115,35 @@ class RunTab(QWidget):
                 split.insertWidget(idx, widget)
             finally:
                 split.blockSignals(False)
-        new_sizes: list[int] = []
-        if desired:
-            for idx, widget in enumerate(desired):
-                size = size_map.get(widget)
-                if size is None and idx < len(current_sizes):
-                    size = current_sizes[idx]
-                if size is None:
-                    size = 0
-                new_sizes.append(int(size))
-        if new_sizes and any(new_sizes):
-            try:
-                split.setSizes(new_sizes)
-            except Exception:
-                pass
+        
+        # Enforce strict sizing: Controls get minimal width, Video gets the rest
+        # This overrides any previous user resizing or state
         try:
-            split.setStretchFactor(0, 1)
-            split.setStretchFactor(1, 1)
+            if self._mirror_mode:
+                # [Controls, Video]
+                split.setSizes([380, 100000])
+            else:
+                # [Video, Controls]
+                split.setSizes([100000, 380])
+        except Exception:
+            pass
+
+        try:
+            # Ensure Video (left) stretches and Controls (right) are fixed
+            idx_video = split.indexOf(left)
+            idx_ctrl = split.indexOf(right)
+            if idx_video >= 0:
+                split.setStretchFactor(idx_video, 1)
+            if idx_ctrl >= 0:
+                split.setStretchFactor(idx_ctrl, 0)
+            
+            # Re-disable handle to prevent sliding, but keep 10px gap
+            split.setHandleWidth(10)
+            split.setRubberBand(-1)
+            handle = split.handle(1)
+            if handle:
+                handle.setEnabled(False)
+                handle.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         except Exception:
             pass
         self._apply_control_alignment()
@@ -2527,7 +2234,7 @@ class RunTab(QWidget):
         self.ui_scale = 1.0
         self._theme_name = _ACTIVE_THEME_NAME
         self._theme = dict(active_theme())
-        self._mirror_mode = True
+        self._mirror_mode = False
         self._theme_overlay: QWidget | None = None
         self._theme_overlay_anim: QPropertyAnimation | None = None
 
@@ -2848,7 +2555,14 @@ class RunTab(QWidget):
         self.popout_btn.toggled.connect(self._toggle_preview_popout)
         self.popout_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         r2.addWidget(self.popout_btn)
-        r2b = QHBoxLayout(); r2b.addWidget(self.rec_start_btn); r2b.addWidget(self.rec_stop_btn); r2b.addWidget(self.rec_indicator)
+        
+        self.show_cv_check = QCheckBox("Show Analysis")
+        self.show_cv_check.setToolTip("Overlay Stentor tracking and state classification")
+        r2.addWidget(self.show_cv_check)
+        
+        self.auto_rec_check = QCheckBox("Auto-Rec")
+        self.auto_rec_check.setToolTip("Start recording automatically when run starts")
+        r2b = QHBoxLayout(); r2b.addWidget(self.rec_start_btn); r2b.addWidget(self.rec_stop_btn); r2b.addWidget(self.rec_indicator); r2b.addWidget(self.auto_rec_check)
         camera_section = QVBoxLayout()
         camera_section.setContentsMargins(0, 0, 0, 0)
         camera_section.setSpacing(6)
@@ -2861,15 +2575,17 @@ class RunTab(QWidget):
         self.lbl_lambda = QLabel("λ (taps/min):")
         self.lbl_stepsize = QLabel("Stepsize:")
         self.lbl_replicant = QLabel("Replicant:")
+        self.lbl_autostop = QLabel("Stop after (min):")
         lfm = self.lbl_mode.fontMetrics()
         label_w = max(
             lfm.horizontalAdvance("Mode:"),
             lfm.horizontalAdvance("Period:"),
             lfm.horizontalAdvance("λ (taps/min):"),
             lfm.horizontalAdvance("Stepsize:"),
-            lfm.horizontalAdvance("Replicant:")
+            lfm.horizontalAdvance("Replicant:"),
+            lfm.horizontalAdvance("Stop after (min):")
         ) + 8
-        for lbl in (self.lbl_mode, self.lbl_period, self.lbl_lambda, self.lbl_stepsize, self.lbl_replicant):
+        for lbl in (self.lbl_mode, self.lbl_period, self.lbl_lambda, self.lbl_stepsize, self.lbl_replicant, self.lbl_autostop):
             lbl.setFixedWidth(label_w)
         controls_grid = QGridLayout()
         controls_grid.setContentsMargins(0, 0, 0, 0)
@@ -2882,6 +2598,17 @@ class RunTab(QWidget):
         replicant_controls.addStretch(1)
         replicant_controls.addWidget(self.replicant_load_btn, 0, Qt.AlignRight)
         replicant_controls.addWidget(self.replicant_clear_btn, 0, Qt.AlignRight)
+        
+        # Auto-stop control
+        self.auto_stop_min = QDoubleSpinBox()
+        self.auto_stop_min.setRange(0.0, 20000.0)
+        self.auto_stop_min.setValue(0.0)
+        self.auto_stop_min.setDecimals(1)
+        self.auto_stop_min.setSuffix(" min")
+        self.auto_stop_min.setSpecialValueText("Off")
+        self.auto_stop_min.setFixedWidth(200)
+        self.auto_stop_min.setToolTip("Stop run automatically after N minutes (0=Off)")
+        
         controls_grid.addWidget(self.lbl_replicant, 0, 0, Qt.AlignLeft)
         controls_grid.addLayout(replicant_controls, 0, 1)
         controls_grid.addWidget(self.lbl_mode, 1, 0, Qt.AlignLeft)
@@ -2892,6 +2619,8 @@ class RunTab(QWidget):
         controls_grid.addWidget(self.lambda_rpm, 3, 1, Qt.AlignRight)
         controls_grid.addWidget(self.lbl_stepsize, 4, 0, Qt.AlignLeft)
         controls_grid.addWidget(self.stepsize, 4, 1, Qt.AlignRight)
+        controls_grid.addWidget(self.lbl_autostop, 5, 0, Qt.AlignLeft)
+        controls_grid.addWidget(self.auto_stop_min, 5, 1, Qt.AlignRight)
         controls_grid.setColumnStretch(1, 1)
         mode_section = QVBoxLayout()
         mode_section.setContentsMargins(0, 0, 0, 0)
@@ -2937,7 +2666,7 @@ class RunTab(QWidget):
         logo_section.addLayout(logo_row)
         logo_section.addStretch(1)
 
-        section_gap = 54  # triple gap keeps clusters distinct without feeling sparse
+        section_gap = 24  # triple gap keeps clusters distinct without feeling sparse
         self._section_gap = section_gap
         sections = [
             top_status_section,
@@ -2984,7 +2713,7 @@ class RunTab(QWidget):
         right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         right_scroll.setMinimumWidth(380)
         self._right_scroll = right_scroll
-        splitter = GuideSplitter(Qt.Horizontal, snap_targets=(0.25, 0.5, 0.75), theme=self._theme)
+        splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(leftw)
         splitter.addWidget(right_scroll)
         splitter.setChildrenCollapsible(False)
@@ -2994,13 +2723,24 @@ class RunTab(QWidget):
         except Exception:
             pass
         splitter.setHandleWidth(10)
+        try:
+            splitter.setRubberBand(-1)
+        except Exception:
+            pass
+        try:
+            handle = splitter.handle(1)
+            if handle:
+                handle.setEnabled(False)
+                handle.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        except Exception:
+            pass
         splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(1, 0)
         try:
             total = max(1, self.width())
             left = int(round(total * 0.75))
             right = max(360, total - left)
-            splitter.set_pane_sizes([left, right])
+            splitter.setSizes([left, right])
         except Exception:
             pass
 
@@ -3031,7 +2771,6 @@ class RunTab(QWidget):
         # Finalize minimum size after the widget is laid out so viewport >= content minimum
         QTimer.singleShot(0, self._adjust_min_window_size)
         QTimer.singleShot(0, self._apply_titlebar_theme)
-        QTimer.singleShot(0, self._init_splitter_balance)
         QTimer.singleShot(0, self._update_section_spacers)
         self._refresh_combo_styles()
         self._refresh_branding_styles()
@@ -3043,6 +2782,14 @@ class RunTab(QWidget):
         self.cap = None
         self.recorder = None
         self._frame_worker: FrameWorker | None = None
+        
+        # CV Worker Thread
+        self.cv_thread = QThread()
+        self.cv_worker = CVWorker()
+        self.cv_worker.moveToThread(self.cv_thread)
+        self.cv_worker.resultsReady.connect(self._on_cv_results)
+        self.cv_thread.start()
+        
         self.run_timer   = QTimer(self); self.run_timer.setSingleShot(True); self.run_timer.timeout.connect(self._on_tap_due)
         self.session = RunSession()
         self.session.reset_runtime_state()
@@ -3318,6 +3065,10 @@ class RunTab(QWidget):
         self._action_mirror_mode.triggered.connect(self._on_mirror_mode_triggered)
 
         menu.addSeparator()
+        action_fw = menu.addAction("Show Firmware Code...")
+        action_fw.triggered.connect(self._show_firmware_dialog)
+
+        menu.addSeparator()
         action_site = menu.addAction("Visit California Numerics")
         action_site.triggered.connect(lambda: QDesktopServices.openUrl(QUrl("https://californianumerics.com")))
         QTimer.singleShot(0, self._sync_logo_menu_checks)
@@ -3340,6 +3091,53 @@ class RunTab(QWidget):
 
     def _on_mirror_mode_triggered(self, checked: bool):
         self._set_mirror_mode(checked)
+
+    def _show_firmware_dialog(self):
+        fw_path = BASE_DIR / "firmware/arduino/stentor_habituator_stepper_v9/NEMESIS_Firmware.ino"
+        content = ""
+        try:
+            with open(fw_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception as e:
+            content = f"// Error reading firmware file:\n// {fw_path}\n// {e}"
+            _log_gui_exception(e, context="Load firmware file")
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Arduino Firmware Source")
+        dialog.resize(600, 500)
+        
+        layout = QVBoxLayout(dialog)
+        info = QLabel("Copy this code and flash it to your Arduino via the Arduino IDE.")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+        
+        editor = QPlainTextEdit()
+        editor.setPlainText(content)
+        editor.setReadOnly(True)
+        font = QFontDatabase.systemFont(QFontDatabase.FixedFont)
+        editor.setFont(font)
+        layout.addWidget(editor)
+        
+        btn_row = QHBoxLayout()
+        copy_btn = QPushButton("Copy All")
+        # Lambda to ensure sequence: select all -> copy -> (optional) restore selection? 
+        # Just copy is enough if selectAll is visual feedback.
+        def _copy():
+            editor.selectAll()
+            editor.copy()
+            self._update_status("Firmware code copied to clipboard.")
+            
+        copy_btn.clicked.connect(_copy)
+        
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        
+        btn_row.addStretch(1)
+        btn_row.addWidget(copy_btn)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+        
+        dialog.exec()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -3503,6 +3301,13 @@ class RunTab(QWidget):
 
     # Hardware serial processing
 
+    def _handle_serial_error(self, msg: str):
+        self._update_status(f"Serial Error: {msg}")
+        if self.serial.is_open():
+            self._toggle_serial() # Disconnect to reset state
+        if hasattr(self, "serial_status"):
+            self.serial_status.setText(f"Error: {msg}")
+
     def _drain_serial_queue(self):
         if not self.serial.is_open():
             return
@@ -3512,6 +3317,9 @@ class RunTab(QWidget):
                 break
             timestamp, line = item
             cleaned = line.strip()
+            if cleaned.startswith("ERROR:"):
+                self._handle_serial_error(cleaned)
+                break
             if not cleaned:
                 continue
             self._handle_serial_line(cleaned, timestamp)
@@ -3710,10 +3518,19 @@ class RunTab(QWidget):
                 pass
 
     def _on_tap_due(self):
+        # Safety check: if run stopped (run_start is None), do not proceed
+        if self.run_start is None:
+            return
+
         if self.session.replicant_running:
             self._fire_replicant_tap()
             return
         self._send_tap("scheduled")
+        
+        # Double-check run state after sending tap, before scheduling next
+        if self.run_start is None:
+            return
+
         delay = self.session.scheduler.next_delay_s()
         self.run_timer.start(int(delay * 1000))
         self._update_status(f"Tap sent. Next in {delay:.3f}s")
@@ -3847,8 +3664,20 @@ class RunTab(QWidget):
             self._update_status(f"Failed to create run directory: {exc}")
             return
         rec_path = meta.get("rec_path") or getattr(self.recorder, "path", "")
-        self.logger = runlogger.RunLogger(run_dir, recording_path=rec_path)
+        self.logger = runlogger_module.RunLogger(run_dir, recording_path=rec_path)
         self.run_dir = run_dir
+        
+        # Initialize CV Tracking Logger
+        try:
+            self.session.tracking_logger = TrackingLogger(run_dir)
+        except Exception as e:
+            self._update_status(f"Failed to init tracking log: {e}")
+        
+        # Capture app logs to run folder
+        try:
+            runlogger_module.configure_file_logging(run_dir / "app.log")
+        except Exception:
+            pass
 
         seed = meta.get("seed")
         if seed in (None, "", "None"):
@@ -3905,7 +3734,9 @@ class RunTab(QWidget):
                 self._record_serial_command('—', f"{note}; serial closed")
             return False
         for ch in payload:
-            self.serial.send_char(ch)
+            if not self.serial.send_char(ch):
+                self._handle_serial_error("Write failed (device disconnected?)")
+                return False
         self._record_serial_command(payload, note)
         if len(payload) == 1:
             if payload == 'e':
@@ -4376,9 +4207,21 @@ class RunTab(QWidget):
         self.lambda_rpm.setToolTip("Adjust when Mode is set to Poisson")
 
     def _start_run(self):
+        # Disk space safety check (soft warning)
+        try:
+            _total, _used, free = shutil.disk_usage(self.outdir_edit.text().strip() or ".")
+            if free < 1024 * 1024 * 1024:  # 1 GB
+                QMessageBox.warning(self, "Low Disk Space", f"Free space is low ({free // (1024*1024)} MB). Recording may stop unexpectedly.")
+        except Exception:
+            pass
+
         if not self.serial.is_open():
-            QMessageBox.warning(self, "Serial", "Connect to the controller before starting a run.")
-            return
+            resp = QMessageBox.warning(self, "Serial Disconnected", 
+                "Serial is not connected. The hardware will not move.\n\nStart run anyway (logging only)?", 
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if resp != QMessageBox.Yes:
+                return
+
         self._flash_only_mode = False
         use_replicant = self._replicant_mode_active()
         if use_replicant and not self.session.replicant_ready:
@@ -4409,6 +4252,34 @@ class RunTab(QWidget):
             return
         if self._awaiting_switch_start:
             self._update_status("Recording armed. Awaiting physical switch to begin logging.")
+        
+        # Auto-recording countdown
+        if self.auto_rec_check.isChecked() and self.recorder is None:
+            if self.cap is None:
+                QMessageBox.warning(self, "No Camera", "Open a camera to use Auto-Rec.")
+                return
+            pd = QProgressDialog("Auto-starting recording...", "Cancel", 0, 30, self)
+            pd.setWindowModality(Qt.WindowModal)
+            pd.setMinimumDuration(0)
+            pd.setValue(0)
+            aborted = False
+            for i in range(30):
+                if pd.wasCanceled():
+                    aborted = True
+                    break
+                pd.setValue(i)
+                sec = (30 - i + 9) // 10
+                pd.setLabelText(f"Starting recording in {sec}s... (Esc to cancel)")
+                QApplication.processEvents()
+                time.sleep(0.1)
+            pd.setValue(30)
+            if aborted:
+                self._update_status("Run cancelled.")
+                return
+            self._start_recording()
+            if self.recorder is None:
+                return
+
         if self.recorder is None:
             resp = QMessageBox.question(self, "No Recording Active",
                 "You're starting a run without recording video. Continue anyway?",
@@ -4457,12 +4328,23 @@ class RunTab(QWidget):
         self._update_status("Configuration sent. Flip the switch ON to begin the run.")
         self._send_serial_char('e', "Enable motor")
 
-    def _stop_run(self, *_args, from_hardware: bool = False, reason: str | None = None):
+    def _stop_run(self, *_args, from_hardware: bool = False, reason: str | None = None, stop_recording: bool = False):
         try:
             self.run_timer.stop()
         except Exception:
             pass
-        self._finalize_period_calibration()
+        
+        if stop_recording:
+            try:
+                self._stop_recording()
+            except Exception:
+                pass
+
+        try:
+            self._finalize_period_calibration()
+        except Exception:
+            pass
+            
         completed_dir = self.run_dir
         completed_meta = self._pending_run_metadata or {}
         completed_run_id = None
@@ -4474,8 +4356,19 @@ class RunTab(QWidget):
         if completed_run_id is None:
             completed_run_id = completed_meta.get("run_id")
         if self.logger:
-            self.logger.close()
+            try:
+                self.logger.close()
+            except Exception:
+                pass
             self.logger = None
+        
+        if self.session.tracking_logger:
+            try:
+                self.session.tracking_logger.close()
+            except Exception:
+                pass
+            self.session.tracking_logger = None
+
         if self.run_start is not None:
             try:
                 self._last_run_elapsed = max(0.0, time.monotonic() - self.run_start)
@@ -4489,8 +4382,14 @@ class RunTab(QWidget):
         self.session.replicant_progress = 0
         self._awaiting_replicant_timer = False
         self._update_replicant_status()
-        if not from_hardware and self.serial.is_open():
-            self._send_serial_char('d', "Disable motor")
+        
+        if not from_hardware:
+            try:
+                if self.serial.is_open():
+                    self._send_serial_char('d', "Disable motor")
+            except Exception:
+                pass
+                
         self._hardware_run_active = False
         self._awaiting_switch_start = False
         self._hardware_configured = False
@@ -4609,13 +4508,16 @@ class DashboardTab(QWidget):
         action_row.setSpacing(8)
         self.open_btn = QPushButton("Open Folder")
         self.open_btn.clicked.connect(self._open_run_folder)
+        self.analyze_btn = QPushButton("Analyze Run")
+        self.analyze_btn.clicked.connect(self._analyze_run)
         self.export_btn = QPushButton("Export CSV…")
         self.export_btn.clicked.connect(self._export_run_csv)
         self.delete_btn = QPushButton("Delete…")
         self.delete_btn.clicked.connect(self._delete_run)
-        for btn in (self.open_btn, self.export_btn, self.delete_btn):
+        for btn in (self.open_btn, self.analyze_btn, self.export_btn, self.delete_btn):
             btn.setEnabled(False)
         action_row.addWidget(self.open_btn)
+        action_row.addWidget(self.analyze_btn)
         action_row.addWidget(self.export_btn)
         action_row.addWidget(self.delete_btn)
         action_row.addStretch(1)
@@ -4627,6 +4529,28 @@ class DashboardTab(QWidget):
         self.set_theme(active_theme())
 
     # Run list management
+
+    def _analyze_run(self):
+        summary = self.current_summary
+        if not summary:
+            return
+        
+        self.info_label.setText(f"Analyzing {summary.run_id}...")
+        QApplication.processEvents()
+        
+        analyzer = RunAnalyzer(summary.path)
+        results = analyzer.analyze()
+        
+        if results:
+            self.info_label.setText(f"Analysis complete for {summary.run_id}.\n"
+                                    f"Processed {len(results['taps'])} taps.")
+            QMessageBox.information(self, "Analysis Complete", 
+                                    f"Successfully analyzed {len(results['taps'])} taps.\n"
+                                    f"Saved to {summary.path / 'analysis.json'}")
+            # Here we could reload the chart with the new data if we parse analysis.json
+        else:
+            self.info_label.setText("Analysis failed. Check logs.")
+            QMessageBox.warning(self, "Analysis Failed", "Could not analyze run. Ensure tracking.csv exists.")
 
     def refresh_runs(self, *_args, select_run: Optional[str] = None):
         current_target = select_run or (self.current_summary.run_id if self.current_summary else None)
@@ -4650,6 +4574,7 @@ class DashboardTab(QWidget):
         items = self.run_list.selectedItems()
         count = len(items)
         self.open_btn.setEnabled(count == 1)
+        self.analyze_btn.setEnabled(count == 1)
         self.export_btn.setEnabled(count >= 1)
         self.delete_btn.setEnabled(count >= 1)
         if hasattr(self, "chart_export_btn"):
@@ -4944,7 +4869,7 @@ class DashboardTab(QWidget):
             f"QPushButton {{background: {mid}; color: {text}; border: 1px solid {theme.get('BUTTON_BORDER', border)}; padding: 4px 10px; border-radius: 0px;}}\n"
             f"QPushButton:hover {{background: {accent}; color: {bg}; border-color: {accent}; border-radius: 0px;}}"
         )
-        for btn in (self.refresh_btn, self.open_btn, self.export_btn, self.delete_btn):
+        for btn in (self.refresh_btn, self.open_btn, self.analyze_btn, self.export_btn, self.delete_btn):
             btn.setStyleSheet(button_style.strip())
         self.chart.set_theme(theme)
 
@@ -5037,10 +4962,9 @@ def _run_tab_init_splitter_balance(self):
     if split is None:
         return
     try:
-        total = max(1, self.width())
-        right = int(round(total * 0.75))
-        left = max(360, total - right)
-        split.set_pane_sizes([left, right])
+        # Give video pane (left) massive preference so it takes all available slack
+        # Control pane (right) just needs its minimum width (approx 380)
+        split.setSizes([100000, 380])
     except Exception:
         pass
 
@@ -5211,28 +5135,66 @@ def _run_tab_finalize_period_calibration(self):
         self._update_status(f"Calibration updated for {port}: x{factor:.6f} (raw {raw_factor:.6f})")
 
 
-def _run_tab_handle_frame(self, frame):
+def _run_tab_handle_frame(self, frame, frame_idx=0, timestamp=0.0):
     if self.cap is None or frame is None:
         return
+    
+    # Create overlay surface
     overlay = frame.copy()
-    self._preview_frame_counter += 1
+    rgb = cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
+    h, w, ch = rgb.shape
+    bytes_per_line = ch * w
+    qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
+    pix = QPixmap.fromImage(qimg)
+    
+    # Draw CV Results
+    self._draw_cv_overlay(pix)
+    
+    self._preview_frame_counter = frame_idx
+    
+    # Legacy timestamp (optional, but CV overlay is better)
     try:
-        text = f"T+{(time.monotonic()-(self.run_start or time.monotonic())):8.3f}s" if self.run_start else "Preview"
-        cv2.putText(overlay, text, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+        if self.run_start and not self.show_cv_check.isChecked():
+             text = f"T+{(time.monotonic()-self.run_start):8.3f}s"
+             # We can't draw on pixmap with cv2 logic here, skipping legacy overlay if CV is off
+             pass
     except Exception:
         pass
+
     h, w = overlay.shape[:2]
     if w and h:
         self._maybe_update_preview_aspect(w, h)
-    qimg = QImage(overlay.data, w, h, 3 * w, QImage.Format_BGR888)
-    pix = QPixmap.fromImage(qimg)
+        
     self.video_view.set_image(pix)
     if self._pip_window:
         self._pip_window.set_pixmap(pix)
+        
     if self.recorder:
-        self._recorded_frame_counter += 1
-        self.recorder.write(overlay)
+        self._recorded_frame_counter = frame_idx
+        self.recorder.write(frame) # Write clean frame
 
+def _run_tab_on_cv_results(self, results, frame_idx, timestamp, mask):
+    self.session.cv_results = results
+    self.session.cv_mask = mask
+    if self.session.tracking_logger:
+        self.session.tracking_logger.log_frame(frame_idx, timestamp, results)
+
+def _run_tab_draw_cv_overlay(self, pixmap: QPixmap):
+    if not hasattr(self, "show_cv_check") or not self.show_cv_check.isChecked():
+        return
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    results = getattr(self.session, "cv_results", [])
+    for s in results:
+        r, g, b = s.debug_color
+        color = QColor(r, g, b)
+        cx, cy = s.centroid
+        painter.setPen(QPen(color, 2))
+        painter.drawEllipse(QPoint(int(cx), int(cy)), 15, 15)
+        painter.setPen(QPen(Qt.white, 1))
+        painter.drawText(int(cx) - 10, int(cy) - 20, f"ID:{s.id}")
+        painter.drawText(int(cx) - 10, int(cy) + 30, s.state[:3])
+    painter.end()
 
 def _run_tab_start_frame_stream(self):
     worker = getattr(self, "_frame_worker", None)
@@ -5244,6 +5206,11 @@ def _run_tab_start_frame_stream(self):
     interval = int(1000 / max(1, self.preview_fps))
     self._frame_worker = FrameWorker(self.cap, interval)
     self._frame_worker.frameReady.connect(self._handle_frame, Qt.QueuedConnection)
+    
+    # Feed CV Bot
+    if hasattr(self, 'cv_worker'):
+            self._frame_worker.frameReady.connect(self.cv_worker.process_frame, Qt.QueuedConnection)
+            
     self._frame_worker.error.connect(self._update_status, Qt.QueuedConnection)
     self._frame_worker.stopped.connect(self._cleanup_frame_stream, Qt.QueuedConnection)
     self._frame_worker.start()
@@ -5297,6 +5264,8 @@ RunTab._handle_frame = _run_tab_handle_frame
 RunTab._start_frame_stream = _run_tab_start_frame_stream
 RunTab._stop_frame_stream = _run_tab_stop_frame_stream
 RunTab._cleanup_frame_stream = _run_tab_cleanup_frame_stream
+RunTab._on_cv_results = _run_tab_on_cv_results
+RunTab._draw_cv_overlay = _run_tab_draw_cv_overlay
 
 
 def _run_tab_shutdown(self):
@@ -5782,37 +5751,59 @@ class App(QWidget):
         self._refresh_tab_close_buttons()
 
     # Frame loop
-    def _handle_frame(self, frame):
-        if self.cap is None or frame is None:
-            return
-        overlay = frame.copy()
-        self._preview_frame_counter += 1
-        try:
-            text = f"T+{(time.monotonic()-(self.run_start or time.monotonic())):8.3f}s" if self.run_start else "Preview"
-            cv2.putText(overlay, text, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2, cv2.LINE_AA)
-        except Exception:
-            pass
-        h, w = overlay.shape[:2]
-        if w and h:
-            self._maybe_update_preview_aspect(w, h)
-        qimg = QImage(overlay.data, w, h, 3*w, QImage.Format_BGR888)
-        pix = QPixmap.fromImage(qimg)
-        self.video_view.set_image(pix)
-        if self._pip_window:
-            self._pip_window.set_pixmap(pix)
-        if self.recorder:
-            self._recorded_frame_counter += 1
-            self.recorder.write(overlay)
-
-    def _start_frame_stream(self):
-        if self.cap is None or self._frame_worker is not None:
-            return
-        interval = int(1000 / max(1, self.preview_fps))
-        self._frame_worker = FrameWorker(self.cap, interval)
-        self._frame_worker.frameReady.connect(self._handle_frame, Qt.QueuedConnection)
-        self._frame_worker.error.connect(self._update_status, Qt.QueuedConnection)
-        self._frame_worker.stopped.connect(self._cleanup_frame_stream, Qt.QueuedConnection)
-        self._frame_worker.start()
+        def _handle_frame(self, frame, frame_idx, timestamp):
+            if self.cap is None or frame is None:
+                return
+            
+            # Overlay CV Results
+            overlay = frame.copy()
+            rgb = cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb.shape
+            bytes_per_line = ch * w
+            qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            pix = QPixmap.fromImage(qimg)
+            
+            # Draw CV Overlay
+            self._draw_cv_overlay(pix)
+            
+            self._preview_frame_counter = frame_idx
+            
+            # Legacy time overlay
+            try:
+                 # Just draw on the pixmap? No, legacy drew on the CV frame. 
+                 # For now, let's trust the CV overlay.
+                 pass
+            except Exception:
+                 pass
+    
+            h, w = overlay.shape[:2]
+            if w and h:
+                self._maybe_update_preview_aspect(w, h)
+                
+            self.video_view.set_image(pix)
+            if self._pip_window:
+                self._pip_window.set_pixmap(pix)
+                
+            if self.recorder:
+                self._recorded_frame_counter = frame_idx
+                self.recorder.write(frame) # Write the clean frame (or overlay if desired?) 
+                                           # Requirement said "nothing anchoring data to video", implying clean video.
+                                           # We keep the video clean.
+    
+        def _start_frame_stream(self):
+            if self.cap is None or self._frame_worker is not None:
+                return
+            interval = int(1000 / max(1, self.preview_fps))
+            self._frame_worker = FrameWorker(self.cap, interval)
+            self._frame_worker.frameReady.connect(self._handle_frame, Qt.QueuedConnection)
+            
+            # Feed CV Bot
+            if hasattr(self, 'cv_worker'):
+                 self._frame_worker.frameReady.connect(self.cv_worker.process_frame, Qt.QueuedConnection)
+                 
+            self._frame_worker.error.connect(self._update_status, Qt.QueuedConnection)
+            self._frame_worker.stopped.connect(self._cleanup_frame_stream, Qt.QueuedConnection)
+            self._frame_worker.start()
 
     def _stop_frame_stream(self):
         worker = self._frame_worker
@@ -5835,6 +5826,12 @@ class App(QWidget):
         cam_idx = self.cam_index.value()
         fps = int(self.preview_fps or 0)
         rec = "REC ON" if self.recorder else "REC OFF"
+        if self.recorder:
+            total = getattr(self.recorder, "total_frames", 0)
+            dropped = getattr(self.recorder, "dropped_frames", 0)
+            if total > 0:
+                pct = (dropped / total) * 100.0
+                rec += f" (drop {pct:.1f}%)"
         port = self.port_edit.currentText().strip() if self.serial.is_open() else "—"
         serial_state = f"serial:{port}" if self.serial.is_open() else "serial:DISCONNECTED"
         if self.session.replicant_running or self._replicant_mode_active():
@@ -5848,6 +5845,18 @@ class App(QWidget):
         taps = self.taps
         if self.run_start:
             elapsed = time.monotonic() - self.run_start
+            # Auto-stop logic (low-overhead check)
+            try:
+                limit_min = self.auto_stop_min.value()
+                # Debug print to verify logic
+                # print(f"DEBUG: elapsed={elapsed:.2f}s, limit={limit_min:.2f}min, check={(elapsed/60.0)}")
+                if limit_min > 0 and (elapsed / 60.0) >= limit_min:
+                    print(f"DEBUG: Auto-stop triggered! Elapsed={elapsed/60.0:.4f}m Limit={limit_min}m")
+                    self._stop_run(reason=f"Auto-stop after {limit_min:.1f} min", stop_recording=True)
+                    return
+            except Exception as e:
+                print(f"DEBUG: Auto-stop error: {e}")
+                pass
         else:
             elapsed = self._last_run_elapsed
         overall_rate = (taps/elapsed*60.0) if elapsed>0 else 0.0
@@ -6106,7 +6115,8 @@ def main():
             app.setWindowIcon(_APP_ICON)
     except Exception:
         _APP_ICON = None
-    w = App(); w.show()
+    w = App()
+    w.show()
     sys.exit(app.exec())
 
 if __name__ == "__main__":

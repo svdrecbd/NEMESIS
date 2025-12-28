@@ -4,6 +4,9 @@
 # - VideoRecorder: wraps OpenCV VideoWriter with MP4→AVI fallback
 
 import cv2
+import threading
+import queue
+from app.core.logger import APP_LOGGER
 
 class VideoCapture:
     def __init__(self, index=0):
@@ -43,19 +46,25 @@ class VideoCapture:
 
 class VideoRecorder:
     """
-    Simple MP4/MJPG recorder. Tries MP4V in .mp4; falls back to MJPG .avi if needed.
-    Usage:
-        rec = VideoRecorder("out.mp4", fps=30, frame_size=(1280,720))
-        if rec.is_open():
-            rec.write(frame_bgr)
-            rec.close()
+    Threaded MP4/MJPG recorder. Writes frames in a background thread to
+    ensure the main application/preview never stutters due to disk I/O.
     """
     def __init__(self, path: str, fps: int = 30, frame_size=(1280, 720)):
         self._path = path
         self.fps = max(1, int(fps))
         self.frame_size = tuple(frame_size)
         self.writer = None
+        
+        # Buffer up to ~2 seconds of video (at 30fps) to absorb disk latency
+        self._queue = queue.Queue(maxsize=60)
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        
+        self.total_frames = 0
+        self.dropped_frames = 0
+        
         self._open_writer()
+        self._thread.start()
 
     def _open_writer(self):
         # Try MP4 (mp4v) first
@@ -76,16 +85,54 @@ class VideoRecorder:
     def is_open(self) -> bool:
         return self.writer is not None and self.writer.isOpened()
 
+    def _worker(self):
+        """Background loop to process resize and write operations."""
+        while True:
+            try:
+                # Wait for a frame, but check stop_event periodically
+                frame = self._queue.get(timeout=0.1)
+            except queue.Empty:
+                if self._stop_event.is_set():
+                    break
+                continue
+
+            if frame is None: # Explicit sentinel to stop
+                break
+
+            if self.writer:
+                try:
+                    # Offload the resize cost to this thread too
+                    h, w = frame.shape[:2]
+                    if (w, h) != self.frame_size:
+                        frame = cv2.resize(frame, self.frame_size)
+                    self.writer.write(frame)
+                except Exception as e:
+                    APP_LOGGER.error(f"Error writing video frame in VideoRecorder worker: {e}") 
+            
+            self._queue.task_done()
+
     def write(self, bgr_frame):
         if not self.is_open():
             return
-        # Ensure size matches output
-        h, w = bgr_frame.shape[:2]
-        if (w, h) != self.frame_size:
-            bgr_frame = cv2.resize(bgr_frame, self.frame_size)
-        self.writer.write(bgr_frame)
+        # Non-blocking put. If buffer fills (disk stalled), drop frame
+        # to protect the live UI/preview responsiveness.
+        self.total_frames += 1
+        try:
+            self._queue.put_nowait(bgr_frame)
+        except queue.Full:
+            self.dropped_frames += 1 
 
     def close(self):
+        self._stop_event.set()
+        # Signal worker to drain/stop
+        try:
+            self._queue.put(None)
+        except queue.Full:
+            pass # If full, worker will eventually see stop_event
+            
+        if self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+            
         if self.writer:
             self.writer.release()
             self.writer = None

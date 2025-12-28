@@ -14,6 +14,10 @@ dist/
 venv/
 .env/
 .ipynb_checkpoints/
+qaenv/
+.cache/
+.mplconfig/
+.pytest_cache/
 
 # OS cruft
 .DS_Store
@@ -30,4 +34,3 @@ recordings/
 # PyInstaller
 build/
 dist/
-*.spec
