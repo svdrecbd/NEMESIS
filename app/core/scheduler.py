@@ -2,6 +2,15 @@
 from __future__ import annotations
 import random, math
 
+DEFAULT_PERIOD_S = 10.0
+DEFAULT_LAMBDA_PER_MIN = 6.0
+SECONDS_PER_MIN = 60.0
+MIN_RATE_PER_SEC = 1e-6
+MAX_RATE_PER_SEC = 1e6
+MIN_UNIFORM = 1e-12
+MIN_DELAY_S = 0.001
+MAX_DELAY_S = 3600.0
+
 class TapScheduler:
     """
     Host-side scheduler for tap inter-arrival times.
@@ -11,8 +20,8 @@ class TapScheduler:
     """
     def __init__(self, seed: int | None = None):
         self._mode = "Periodic"
-        self._period_s = 10.0
-        self._lambda_per_min = 6.0
+        self._period_s = DEFAULT_PERIOD_S
+        self._lambda_per_min = DEFAULT_LAMBDA_PER_MIN
         self._rng = random.Random()
         if seed is not None:
             self.set_seed(seed)
@@ -36,10 +45,10 @@ class TapScheduler:
         if self._mode == "Periodic":
             return self._period_s
         # Poisson: exponential with mean = 60/λ
-        rate_per_sec = max(1e-6, min(self._lambda_per_min / 60.0, 1e6))
-        u = max(1e-12, self._rng.random())
+        rate_per_sec = max(MIN_RATE_PER_SEC, min(self._lambda_per_min / SECONDS_PER_MIN, MAX_RATE_PER_SEC))
+        u = max(MIN_UNIFORM, self._rng.random())
         delay = -math.log(u) / rate_per_sec
-        return max(0.001, min(delay, 3600.0))
+        return max(MIN_DELAY_S, min(delay, MAX_DELAY_S))
 
     def descriptor(self) -> dict:
         return {

@@ -11,13 +11,27 @@ from PySide6.QtWidgets import (
     QFrame, QComboBox, QMessageBox, QFileDialog
 )
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPen
+from PySide6.QtGui import QColor, QDesktopServices
 
 from app.core.runlib import RunLibrary, RunSummary
 from app.core.analyzer import RunAnalyzer
-from app.core.paths import RUNS_DIR, FONT_PATH
+from app.core.paths import RUNS_DIR
 from app.ui.widgets.chart import LiveChart
 from app.ui.theme import active_theme, BG, BORDER, TEXT, MID, ACCENT
+
+ROOT_MARGIN_PX = 12
+ROOT_SPACING_PX = 12
+DETAIL_PANEL_SPACING_PX = 10
+LIST_PANEL_SPACING_PX = 6
+HEADER_SPACING_PX = 6
+CHART_CONTROLS_TOP_MARGIN_PX = 4
+CHART_CONTROLS_SPACING_PX = 6
+PALETTE_ROW_SPACING_PX = 6
+ACTION_ROW_SPACING_PX = 8
+CHART_FRAME_BORDER_PX = 1
+FONT_FAMILY_FALLBACK = "Typestar OCR Regular"
+SECONDS_PER_MIN = 60.0
+MS_PER_SEC = 1000.0
 
 class DashboardTab(QWidget):
     def __init__(self):
@@ -29,17 +43,17 @@ class DashboardTab(QWidget):
         self.current_times: list[float] = []
 
         root = QHBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(12)
+        root.setContentsMargins(ROOT_MARGIN_PX, ROOT_MARGIN_PX, ROOT_MARGIN_PX, ROOT_MARGIN_PX)
+        root.setSpacing(ROOT_SPACING_PX)
 
         # Run list
         list_panel = QVBoxLayout()
         list_panel.setContentsMargins(0, 0, 0, 0)
-        list_panel.setSpacing(6)
+        list_panel.setSpacing(LIST_PANEL_SPACING_PX)
 
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
-        header.setSpacing(6)
+        header.setSpacing(HEADER_SPACING_PX)
         header_label = QLabel("Runs")
         header_label.setStyleSheet("font-weight:bold;")
         header.addWidget(header_label)
@@ -59,7 +73,7 @@ class DashboardTab(QWidget):
         # Detail / chart panel
         detail_panel = QVBoxLayout()
         detail_panel.setContentsMargins(0, 0, 0, 0)
-        detail_panel.setSpacing(10)
+        detail_panel.setSpacing(DETAIL_PANEL_SPACING_PX)
 
         self.info_label = QLabel("Select a run to inspect logs and metrics.")
         self.info_label.setWordWrap(True)
@@ -68,20 +82,22 @@ class DashboardTab(QWidget):
 
         # Chart reuse LiveChart
         self.chart_frame = QFrame()
-        self.chart_frame.setStyleSheet(f"background: {BG}; border: 1px solid {BORDER};")
+        self.chart_frame.setStyleSheet(
+            f"background: {BG}; border: {CHART_FRAME_BORDER_PX}px solid {BORDER};"
+        )
         self.chart_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         chart_layout = QVBoxLayout(self.chart_frame)
         chart_layout.setContentsMargins(0, 0, 0, 0)
         chart_layout.setSpacing(0)
         
         # Font handling is tricky if font DB isn't loaded, but Chart handles fallback
-        font_family = "Typestar OCR Regular" # Best effort assumption
+        font_family = FONT_FAMILY_FALLBACK # Best effort assumption
         self.chart = LiveChart(font_family=font_family, theme=active_theme())
         
         chart_layout.addWidget(self.chart.canvas)
         chart_controls = QHBoxLayout()
-        chart_controls.setContentsMargins(0, 4, 0, 0)
-        chart_controls.setSpacing(6)
+        chart_controls.setContentsMargins(0, CHART_CONTROLS_TOP_MARGIN_PX, 0, 0)
+        chart_controls.setSpacing(CHART_CONTROLS_SPACING_PX)
         self.long_mode_combo = QComboBox()
         self.long_mode_combo.addItem("Tap Raster", "taps")
         self.long_mode_combo.addItem("Contraction Heatmap", "contraction")
@@ -100,7 +116,7 @@ class DashboardTab(QWidget):
         palette_box = QWidget()
         palette_box_layout = QHBoxLayout(palette_box)
         palette_box_layout.setContentsMargins(0, 0, 0, 0)
-        palette_box_layout.setSpacing(6)
+        palette_box_layout.setSpacing(PALETTE_ROW_SPACING_PX)
         palette_box_layout.addWidget(palette_label)
         palette_box_layout.addWidget(self.chart_palette_combo)
         self.chart_palette_box = palette_box
@@ -119,7 +135,7 @@ class DashboardTab(QWidget):
         # Action buttons
         action_row = QHBoxLayout()
         action_row.setContentsMargins(0, 0, 0, 0)
-        action_row.setSpacing(8)
+        action_row.setSpacing(ACTION_ROW_SPACING_PX)
         self.open_btn = QPushButton("Open Folder")
         self.open_btn.clicked.connect(self._open_run_folder)
         self.analyze_btn = QPushButton("Analyze Run")
@@ -255,7 +271,7 @@ class DashboardTab(QWidget):
         if summary.started_at:
             parts.append(f"Started: {summary.started_at}")
         if summary.duration_s is not None:
-            parts.append(f"Duration: {summary.duration_s/60:.1f} min")
+            parts.append(f"Duration: {summary.duration_s / SECONDS_PER_MIN:.1f} min")
         if summary.taps_count is not None:
             parts.append(f"Taps: {summary.taps_count}")
         if summary.mode:
@@ -284,7 +300,7 @@ class DashboardTab(QWidget):
                     t_ms = float(row.get("t_host_ms", 0.0))
                     if first_host is None:
                         first_host = t_ms
-                    times.append((t_ms - first_host) / 1000.0)
+                    times.append((t_ms - first_host) / MS_PER_SEC)
         except Exception:
             return []
         return times

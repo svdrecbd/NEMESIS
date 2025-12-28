@@ -1,4 +1,3 @@
-import pytest
 import time
 from unittest.mock import MagicMock
 from app.drivers.arduino_driver import SerialLink
@@ -34,7 +33,7 @@ def test_serial_link_error_handling():
     time.sleep(0.1)
     
     line = link.read_line_nowait()
-    assert "ERROR:Serial read failed" in line
+    assert "ERROR:DISCONNECTED" in line
     
     link.close()
 
@@ -51,4 +50,3 @@ def test_serial_link_wait_for():
     assert link.wait_for("FAIL", timeout_s=0.1) is False
     
     link.close()
-

@@ -10,4 +10,5 @@ def test_import_main():
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
     pytest.importorskip("PySide6")
-    import app.main  # noqa: F401
+    import app.main as app_main
+    assert app_main is not None

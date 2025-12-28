@@ -90,6 +90,7 @@ Switch to a **Data Tab** (via the `+` button) to access the Dashboard.
 *   **Timing Drift**: Long-duration periodic runs (>24h) may experience slight clock drift between the host and firmware timing. The application saves calibration data to mitigate this in subsequent runs.
 *   **Zoom Bounds**: Pinch-to-zoom on some trackpads may feel sensitive; use `Cmd/Ctrl` + `+/-` for precise control.
 *   **Video Encoding**: If recording fails to start, ensure FFmpeg is installed and accessible in your system PATH.
+*   **UNIT1 Status**: The UNIT1 firmware/protocol path is experimental and not part of this release. Use the Arduino firmware in `firmware/arduino/` for production runs.
 
 ## License & Attribution
 

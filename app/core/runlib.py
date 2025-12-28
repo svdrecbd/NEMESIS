@@ -9,6 +9,7 @@ from typing import Iterable, Optional, List
 from app.core.logger import APP_LOGGER
 
 RUN_PREFIX = "run_"
+MS_PER_SEC = 1000.0
 
 
 def iter_run_dirs(base: Path) -> Iterable[Path]:
@@ -78,8 +79,8 @@ class RunSummary:
             return
         self.taps_count = len(rows)
         try:
-            first = float(rows[0]["t_host_ms"]) / 1000.0
-            last = float(rows[-1]["t_host_ms"]) / 1000.0
+            first = float(rows[0]["t_host_ms"]) / MS_PER_SEC
+            last = float(rows[-1]["t_host_ms"]) / MS_PER_SEC
             self.duration_s = max(0.0, last - first)
         except Exception as e:
             APP_LOGGER.error(f"Failed to calculate run duration for {self.run_id}: {e}")
@@ -118,4 +119,3 @@ class RunLibrary:
                     APP_LOGGER.error(f"Failed to delete run directory {run_dir}: {e}")
                     return False
         return False
-

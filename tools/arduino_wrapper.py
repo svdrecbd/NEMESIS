@@ -29,6 +29,10 @@ _ensure_repo_root_on_path()
 
 from app.drivers.arduino_driver import SerialLink  # noqa: E402
 
+DEFAULT_BAUD = 9600
+CHAR_SEND_DELAY_S = 0.01
+POST_SEND_DELAY_S = 0.05
+
 
 def drain_output(link: SerialLink) -> None:
     """Print any buffered lines from the Arduino."""
@@ -42,7 +46,12 @@ def drain_output(link: SerialLink) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", required=True, help="Serial port (e.g. COM5 or /dev/ttyUSB0)")
-    parser.add_argument("--baud", type=int, default=9600, help="Baud rate (default: 9600)")
+    parser.add_argument(
+        "--baud",
+        type=int,
+        default=DEFAULT_BAUD,
+        help=f"Baud rate (default: {DEFAULT_BAUD})",
+    )
     parser.add_argument(
         "--no-newline",
         action="store_true",
@@ -76,9 +85,9 @@ def main(argv: list[str] | None = None) -> int:
             for ch in payload:
                 link.send_char(ch)
                 # Short delay allows the firmware to process sequential chars.
-                time.sleep(0.01)
+                time.sleep(CHAR_SEND_DELAY_S)
 
-            time.sleep(0.05)
+            time.sleep(POST_SEND_DELAY_S)
             drain_output(link)
     finally:
         link.close()
@@ -88,4 +97,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover - manual entrypoint
     raise SystemExit(main())
-

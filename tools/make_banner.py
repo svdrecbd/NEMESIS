@@ -2,13 +2,22 @@ from PIL import Image, ImageDraw, ImageFont
 from pathlib import Path
 import textwrap
 
+BANNER_SIZE = (1280, 480)
+BANNER_BG_COLOR = "#ffffff"
+BANNER_TEXT_COLOR = "#000000"
+BANNER_LINE_COLOR = "#000000"
+LOGO_TARGET_HEIGHT = 350
+LOGO_MARGIN_X = 60
+TITLE_FONT_PT = 110
+SUBTITLE_FONT_PT = 40
+SUBTITLE_LINE_SPACING = 12
+SEPARATOR_PADDING = 24
+SEPARATOR_HEIGHT = 4
+TEXT_MARGIN_X = 60
+
 def make_banner():
     # Config
-    WIDTH = 1280
-    HEIGHT = 480
-    BG_COLOR = "#ffffff"
-    TEXT_COLOR = "#000000"
-    LINE_COLOR = "#000000"
+    width, height = BANNER_SIZE
     
     # Paths
     root = Path(__file__).parent.parent
@@ -17,20 +26,20 @@ def make_banner():
     out_path = root / "assets/images/header_v2.png"
 
     # Setup Canvas
-    img = Image.new("RGBA", (WIDTH, HEIGHT), BG_COLOR)
+    img = Image.new("RGBA", (width, height), BANNER_BG_COLOR)
     draw = ImageDraw.Draw(img)
 
     # 1. Load & Scale Logo (Left Side)
     try:
         logo = Image.open(logo_path).convert("RGBA")
         # Target height: 350px
-        logo_h = 350
+        logo_h = LOGO_TARGET_HEIGHT
         logo_aspect = logo.width / logo.height
         logo_w = int(logo_h * logo_aspect)
         logo = logo.resize((logo_w, logo_h), Image.Resampling.LANCZOS)
         
-        logo_x = 60
-        logo_y = (HEIGHT - logo_h) // 2
+        logo_x = LOGO_MARGIN_X
+        logo_y = (height - logo_h) // 2
         img.alpha_composite(logo, (logo_x, logo_y))
     except Exception as e:
         print(f"Error loading logo: {e}")
@@ -38,15 +47,15 @@ def make_banner():
 
     # 2. Text Setup
     try:
-        font_title = ImageFont.truetype(str(font_path), 110)
-        font_sub = ImageFont.truetype(str(font_path), 40)
+        font_title = ImageFont.truetype(str(font_path), TITLE_FONT_PT)
+        font_sub = ImageFont.truetype(str(font_path), SUBTITLE_FONT_PT)
     except Exception as e:
         print(f"Error loading font: {e}")
         return
 
     # Layout Constraints
-    text_start_x = logo_x + logo_w + 60
-    max_text_width = WIDTH - text_start_x - 60
+    text_start_x = logo_x + logo_w + TEXT_MARGIN_X
+    max_text_width = width - text_start_x - TEXT_MARGIN_X
     
     title_text = "NEMESIS"
     raw_subtitle = "Non-periodic Event Monitoring & Evaluation of Stimulus-Induced States"
@@ -83,7 +92,7 @@ def make_banner():
     
     # Subtitle Height
     # We can calculate it by summing line heights if multiline_textbbox fails with anchor
-    line_spacing = 12
+    line_spacing = SUBTITLE_LINE_SPACING
     # Measure one line to get rough height
     l_bbox = draw.textbbox((0, 0), "Tg", font=font_sub, anchor='lt')
     single_line_h = l_bbox[3] - l_bbox[1]
@@ -96,30 +105,30 @@ def make_banner():
         lw = lb[2] - lb[0]
         if lw > sub_w: sub_w = lw
 
-    separator_padding = 24
-    separator_h = 4
+    separator_padding = SEPARATOR_PADDING
+    separator_h = SEPARATOR_HEIGHT
     
     total_content_h = title_h + separator_padding + separator_h + separator_padding + subtitle_h
     
     # Vertical Center
-    start_y = (HEIGHT - total_content_h) // 2
+    start_y = (height - total_content_h) // 2
     
     # 5. Draw
     # Title
-    draw.text((text_start_x, start_y), title_text, font=font_title, fill=TEXT_COLOR, anchor='lt')
+    draw.text((text_start_x, start_y), title_text, font=font_title, fill=BANNER_TEXT_COLOR, anchor='lt')
     
     # Separator
     line_y = start_y + title_h + separator_padding
     line_width = max(title_w, sub_w)
     
-    draw.line([(text_start_x, line_y), (text_start_x + line_width, line_y)], fill=LINE_COLOR, width=separator_h)
+    draw.line([(text_start_x, line_y), (text_start_x + line_width, line_y)], fill=BANNER_LINE_COLOR, width=separator_h)
     
     # Subtitle
     sub_y = line_y + separator_h + separator_padding
     # Draw line by line to avoid multiline anchor issues
     current_y = sub_y
     for line in lines:
-        draw.text((text_start_x, current_y), line, font=font_sub, fill=TEXT_COLOR, anchor='lt')
+        draw.text((text_start_x, current_y), line, font=font_sub, fill=BANNER_TEXT_COLOR, anchor='lt')
         current_y += single_line_h + line_spacing
 
     # Save

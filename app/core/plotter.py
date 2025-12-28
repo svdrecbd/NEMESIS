@@ -7,8 +7,26 @@
 # - single figure: top raster of taps, bottom scatter of responses
 # - no hardcoded datasets or demo section
 
-from typing import Iterable, Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MultipleLocator
+
+DEFAULT_TITLE = "Stentor Habituation to Stimuli"
+DEFAULT_HIGHLIGHT_EVERY = 10
+DEFAULT_FIGSIZE = (15.0, 8.0)
+SECONDS_PER_MIN = 60.0
+FIG_HEIGHT_RATIOS = (1, 5)
+FIG_TITLE_FONT_SIZE = 20
+EVENT_LINEWIDTH_REGULAR = 0.75
+EVENT_LINEWIDTH_HIGHLIGHT = 1.5
+AXIS_LABEL_FONT_SIZE = 14
+LEGEND_FONT_SIZE = 12
+TICK_LABEL_SIZE = 12
+Y_LIMITS = (-5, 105)
+X_MAJOR_TICK_MIN = 10
+X_MINOR_TICK_MIN = 2
+TIGHT_LAYOUT_RECT = (0, 0.03, 1, 0.95)
+SAVE_DPI = 300
 
 def make_figure(
     all_tap_times_seconds: Sequence[float],
@@ -16,9 +34,9 @@ def make_figure(
     main_contraction_percent: Sequence[float],
     steady_state_times_seconds: Sequence[float],
     steady_state_contraction_percent: Sequence[float],
-    title: str = "Stentor Habituation to Stimuli",
-    highlight_every_n: Optional[int] = 10,
-    figsize: Tuple[float, float] = (15.0, 8.0),
+    title: str = DEFAULT_TITLE,
+    highlight_every_n: Optional[int] = DEFAULT_HIGHLIGHT_EVERY,
+    figsize: Tuple[float, float] = DEFAULT_FIGSIZE,
 ) -> "plt.Figure":
     """
     Build the raster+scatter figure.
@@ -52,9 +70,9 @@ def make_figure(
     plt.style.use('default')  # white background
 
     # Convert times to minutes for plotting
-    all_tap_times_minutes = [t / 60.0 for t in all_tap_times_seconds]
-    main_response_times_minutes = [t / 60.0 for t in main_response_times_seconds]
-    steady_state_times_minutes = [t / 60.0 for t in steady_state_times_seconds]
+    all_tap_times_minutes = [t / SECONDS_PER_MIN for t in all_tap_times_seconds]
+    main_response_times_minutes = [t / SECONDS_PER_MIN for t in main_response_times_seconds]
+    steady_state_times_minutes = [t / SECONDS_PER_MIN for t in steady_state_times_seconds]
 
     # Determine regular vs highlighted taps
     if highlight_every_n and highlight_every_n > 0:
@@ -67,17 +85,17 @@ def make_figure(
     # Layout
     fig, (ax1, ax2) = plt.subplots(
         2, 1, sharex=True, figsize=figsize,
-        gridspec_kw={'height_ratios': [1, 5]}
+        gridspec_kw={'height_ratios': FIG_HEIGHT_RATIOS}
     )
-    fig.suptitle(title, fontsize=20)
+    fig.suptitle(title, fontsize=FIG_TITLE_FONT_SIZE)
 
     # --- Top: Stimulus raster ---
     if regular:
-        ax1.eventplot(regular, orientation='horizontal', colors='black', linewidth=0.75)
+        ax1.eventplot(regular, orientation='horizontal', colors='black', linewidth=EVENT_LINEWIDTH_REGULAR)
     if highlighted:
-        ax1.eventplot(highlighted, orientation='horizontal', colors='red', linewidth=1.5)
+        ax1.eventplot(highlighted, orientation='horizontal', colors='red', linewidth=EVENT_LINEWIDTH_HIGHLIGHT)
 
-    ax1.set_ylabel('Taps', fontsize=14)
+    ax1.set_ylabel('Taps', fontsize=AXIS_LABEL_FONT_SIZE)
     ax1.set_yticks([])
     ax1.grid(axis='x', linestyle=':', color='gray')
 
@@ -88,21 +106,21 @@ def make_figure(
                 label='Steady State', zorder=5)
 
     # Formatting
-    ax2.set_xlabel('Time (minutes)', fontsize=14)
-    ax2.set_ylabel('% Contracted', fontsize=14)
-    ax2.legend(fontsize=12)
-    ax1.tick_params(axis='y', labelsize=12)
-    ax2.tick_params(axis='both', labelsize=12)
-    ax2.set_ylim(bottom=-5, top=105)
+    ax2.set_xlabel('Time (minutes)', fontsize=AXIS_LABEL_FONT_SIZE)
+    ax2.set_ylabel('% Contracted', fontsize=AXIS_LABEL_FONT_SIZE)
+    ax2.legend(fontsize=LEGEND_FONT_SIZE)
+    ax1.tick_params(axis='y', labelsize=TICK_LABEL_SIZE)
+    ax2.tick_params(axis='both', labelsize=TICK_LABEL_SIZE)
+    ax2.set_ylim(bottom=Y_LIMITS[0], top=Y_LIMITS[1])
     ax2.yaxis.set_major_formatter(plt.FuncFormatter('{:.0f}%'.format))
-    ax2.xaxis.set_major_locator(plt.MultipleLocator(10))
-    ax2.xaxis.set_minor_locator(plt.MultipleLocator(2))
+    ax2.xaxis.set_major_locator(MultipleLocator(X_MAJOR_TICK_MIN))
+    ax2.xaxis.set_minor_locator(MultipleLocator(X_MINOR_TICK_MIN))
 
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.tight_layout(rect=TIGHT_LAYOUT_RECT)
     return fig
 
 def save_figure(fig: "plt.Figure", out_path: str) -> None:
     """
     Save the figure to a file. Format inferred from extension (.png, .pdf, etc.).
     """
-    fig.savefig(out_path, bbox_inches='tight', dpi=300)
+    fig.savefig(out_path, bbox_inches='tight', dpi=SAVE_DPI)

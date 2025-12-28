@@ -2,12 +2,14 @@
 #include "Protocol.hpp"
 #include "TapEngine.hpp"
 
+constexpr unsigned long DEFAULT_BAUD = 115200;
+
 static Protocol protocol;
 static TapEngine tapper;
 
 void DeviceManager::init() {
     tapper.init();
-    protocol.begin(115200);
+    protocol.begin(DEFAULT_BAUD);
     protocol.sendHello();
 }
 

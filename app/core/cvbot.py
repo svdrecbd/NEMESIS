@@ -1,12 +1,44 @@
 # cvbot.py — The "Brain" for Stentor tracking and state classification
 # Implements the "Green on White" segmentation and "Balloon" tracking logic.
 
+from __future__ import annotations
+
+import multiprocessing
 import cv2
 import numpy as np
 from collections import deque
-from typing import List, Dict, Tuple, Optional
-from dataclasses import dataclass, field
+from typing import List, Dict, Tuple
+from dataclasses import dataclass
 import math
+import queue
+
+from app.core.configio import load_config, save_config
+from app.core.shared_mem import SharedMemoryManager
+
+DEFAULT_EMPTY_MASK_SHAPE = (100, 100)
+DEFAULT_CV_CONFIG = {
+    "min_area": 100,
+    "max_area": 50000,
+    "max_anchor_drift": 100.0,
+    "memory_seconds": 60.0,
+    "circ_threshold": 0.75,
+    "snap_velocity": 0.5,
+    "history_len": 10,
+    "adaptive_block_size": 31,
+    "adaptive_c": -5,
+}
+MIN_ADAPTIVE_BLOCK = 3
+MASK_KERNEL_SIZE = (3, 3)
+MASK_OPEN_ITERATIONS = 2
+HOME_BASE_ALPHA = 0.001
+MIN_CLASSIFY_HISTORY = 3
+QUEUE_POLL_TIMEOUT_S = 0.1
+BGR_RED_CHANNEL = 2
+MASK_MAX_VALUE = 255
+COLOR_GREEN = (0, 255, 0)
+COLOR_RED = (0, 0, 255)
+COLOR_YELLOW = (0, 255, 255)
+RGB_COLOR_MAX_EXCLUSIVE = 255
 
 @dataclass
 class StentorState:
@@ -20,18 +52,52 @@ class StentorState:
 
 class StentorTracker:
     def __init__(self):
-        # Configuration (Tweak these based on real feed)
-        self.min_area = 100         # Ignore noise < 100 px
-        self.max_area = 50000       # Ignore debris > 50k px
+        # Default Configuration
+        self.defaults = {"cv": dict(DEFAULT_CV_CONFIG)}
+        
+        # Load Config
+        cfg = load_config()
+        if cfg is None:
+            cfg = {}
+            
+        # Ensure CV section exists
+        if "cv" not in cfg:
+            cfg["cv"] = self.defaults["cv"]
+            save_config(cfg) # Save defaults for user to edit
+        else:
+            # Merge defaults for any missing keys
+            dirty = False
+            for k, v in self.defaults["cv"].items():
+                if k not in cfg["cv"]:
+                    cfg["cv"][k] = v
+                    dirty = True
+            if dirty:
+                save_config(cfg)
+
+        cv_cfg = cfg["cv"]
+
+        # Configuration (Loaded from config)
+        self.min_area = cv_cfg.get("min_area", DEFAULT_CV_CONFIG["min_area"])
+        self.max_area = cv_cfg.get("max_area", DEFAULT_CV_CONFIG["max_area"])
         
         # Tracking Config (The "Balloon" Logic)
-        self.max_anchor_drift = 100.0 # Pixels. If blob is further than this from Home Base, it's not the same guy.
-        self.memory_seconds = 60.0    # Remember a lost Stentor for 60s before forgetting its Home Base
+        self.max_anchor_drift = cv_cfg.get("max_anchor_drift", DEFAULT_CV_CONFIG["max_anchor_drift"])
+        self.memory_seconds = cv_cfg.get("memory_seconds", DEFAULT_CV_CONFIG["memory_seconds"])
         
         # Classification Config (The "End-on" Speed Trap)
-        self.circ_threshold = 0.75    # Above this, it LOOKS contracted (Ball shape)
-        self.snap_velocity = 0.5      # Change in circularity per second to qualify as a "Snap"
-        self.history_len = 10         # Frames to keep for velocity calc
+        self.circ_threshold = cv_cfg.get("circ_threshold", DEFAULT_CV_CONFIG["circ_threshold"])
+        self.snap_velocity = cv_cfg.get("snap_velocity", DEFAULT_CV_CONFIG["snap_velocity"])
+        self.history_len = int(cv_cfg.get("history_len", DEFAULT_CV_CONFIG["history_len"]))
+        if self.history_len < MIN_CLASSIFY_HISTORY:
+            self.history_len = MIN_CLASSIFY_HISTORY
+        
+        # Adaptive Threshold Parameters
+        self.adaptive_block_size = int(cv_cfg.get("adaptive_block_size", DEFAULT_CV_CONFIG["adaptive_block_size"]))
+        if self.adaptive_block_size < MIN_ADAPTIVE_BLOCK:
+            self.adaptive_block_size = MIN_ADAPTIVE_BLOCK
+        if self.adaptive_block_size % 2 == 0:
+            self.adaptive_block_size += 1
+        self.adaptive_c = int(cv_cfg.get("adaptive_c", DEFAULT_CV_CONFIG["adaptive_c"]))
         
         # State
         self.tracks: Dict[int, dict] = {} 
@@ -60,27 +126,34 @@ class StentorTracker:
         # White BG = High Red (255). Green Stentor = Low Red (0-50).
         # Inverting Red channel makes Stentor bright and BG dark.
         if frame is None:
-            return [], np.zeros((100,100), dtype=np.uint8)
+            return [], np.zeros(DEFAULT_EMPTY_MASK_SHAPE, dtype=np.uint8)
 
-        b, g, r = cv2.split(frame)
+        # 1. Segmentation (Green Stentor on White Background)
+        # Strategy: Use Red channel. 
+        # White BG = High Red (255). Green Stentor = Low Red (0-50).
+        # Inverting Red channel makes Stentor bright and BG dark.
+        
+        # Optimize: Extract only Red channel (index 2 in BGR)
+        # cv2.split copies all 3 channels. extractChannel copies only 1.
+        red_channel = cv2.extractChannel(frame, BGR_RED_CHANNEL)
         
         # Invert Red channel: Stentor (dark in R) becomes bright. BG (bright in R) becomes dark.
-        roi = cv2.bitwise_not(r) 
+        roi = cv2.bitwise_not(red_channel) 
         
         # Adaptive Thresholding to handle lighting drift over weeks
         # Gaussian method handles local shadows better than global threshold
         mask = cv2.adaptiveThreshold(
             roi, 
-            255, 
+            MASK_MAX_VALUE, 
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
             cv2.THRESH_BINARY, 
-            31, # Block size (must be odd, tune this based on Stentor size)
-            -5  # Constant C (subtracting pushes noise to black)
+            self.adaptive_block_size,
+            self.adaptive_c
         )
 
         # Morphological Cleanup (Erode noise, Dilate to fill holes in Stentor body)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, MASK_KERNEL_SIZE)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=MASK_OPEN_ITERATIONS)
         
         # 2. Blob Detection
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -188,7 +261,7 @@ class StentorTracker:
         self._next_id += 1
         
         # Assign random color for debug visualization
-        color = tuple(np.random.randint(0, 255, 3).tolist())
+        color = tuple(np.random.randint(0, RGB_COLOR_MAX_EXCLUSIVE, 3).tolist())
         
         self.tracks[tid] = {
             'id': tid,
@@ -220,7 +293,7 @@ class StentorTracker:
         # Over time, the average centroid approximates the anchor + swing radius center.
         # We update it slowly to account for slight rig shifts over weeks.
         hx, hy = track['home_base']
-        alpha = 0.001 # Very slow update
+        alpha = HOME_BASE_ALPHA  # Very slow update
         track['home_base'] = (hx * (1-alpha) + cx * alpha, hy * (1-alpha) + cy * alpha)
 
     def _classify_state(self, track) -> Tuple[str, Tuple[int, int, int]]:
@@ -232,13 +305,13 @@ class StentorTracker:
         
         # 1. Base Shape Check
         if circ < self.circ_threshold:
-            return "EXTENDED", (0, 255, 0) # Green for Extended/Healthy
+            return "EXTENDED", COLOR_GREEN # Green for Extended/Healthy
             
         # 2. It looks like a ball. Is it a Snap or a Turn?
         # Check derivative
         history = track['history']
-        if len(history) < 3:
-            return "UNDETERMINED", (0, 255, 255) # Yellow - too new
+        if len(history) < MIN_CLASSIFY_HISTORY:
+            return "UNDETERMINED", COLOR_YELLOW # Yellow - too new
             
         # Calculate velocity: d(Circ) / d(Time)
         # Look at change over last ~0.5 seconds
@@ -247,7 +320,7 @@ class StentorTracker:
         
         dt = t_now - t_prev
         if dt <= 0:
-            return "UNDETERMINED", (0, 255, 255)
+            return "UNDETERMINED", COLOR_YELLOW
             
         d_circ = abs(c_now - c_prev)
         velocity = d_circ / dt # Circ units per second
@@ -257,61 +330,120 @@ class StentorTracker:
         # Low Velocity + High Circ = UNDETERMINED (Likely End-on view)
         
         if velocity > self.snap_velocity:
-            return "CONTRACTED", (0, 0, 255) # Red for Contraction event
+            return "CONTRACTED", COLOR_RED # Red for Contraction event
         else:
-            return "UNDETERMINED", (0, 255, 255) # Yellow for Ambiguous/End-on
+            return "UNDETERMINED", COLOR_YELLOW # Yellow for Ambiguous/End-on
 
 
-def run_cv_process(shm_name: str, shm_shape: Tuple[int, int, int], 
-                   input_queue: "multiprocessing.Queue", 
-                   output_queue: "multiprocessing.Queue",
-                   stop_event: "multiprocessing.Event"):
+def run_cv_process(shm_name: str, shm_shape: Tuple[int, ...],
+                   mask_name: str, mask_shape: Tuple[int, ...],
+                   input_queue: multiprocessing.Queue,
+                   output_queue: multiprocessing.Queue,
+                   stop_event: multiprocessing.Event,
+                   slot_generations: multiprocessing.Array,
+                   semaphore: multiprocessing.Semaphore | None):
     """
     Process entry point. Runs in a separate process.
     """
-    from .shared_mem import SharedMemoryManager
-    import time
-    import queue
-
     # Initialize Tracker
     tracker = StentorTracker()
     
     # Attach to Shared Memory
+    shm = None
+    mask_shm = None
+    def _release_slot() -> None:
+        if semaphore is None:
+            return
+        try:
+            semaphore.release()
+        except ValueError:
+            pass
+
     try:
-        with SharedMemoryManager(shm_name, shm_shape, create=False) as shm:
-            while not stop_event.is_set():
+        shm = SharedMemoryManager(shm_name, shm_shape, create=False)
+        mask_shm = SharedMemoryManager(mask_name, mask_shape, create=False)
+        
+        while not stop_event.is_set():
+            try:
+                # Get next frame task
+                # task: (frame_idx, timestamp, buf_idx)
+                task = input_queue.get(timeout=QUEUE_POLL_TIMEOUT_S)
+            except queue.Empty:
+                continue
+            
+            if task is None: # Sentinel
+                break
+                
+            frame_idx, timestamp, buf_idx = task
+            
+            # Seqlock: Verify Data Integrity
+            # 1. Check generation before reading
+            gen_start = slot_generations[buf_idx]
+            
+            if gen_start != frame_idx:
+                # Frame overwritten before we even started!
+                # This means we are lagging way behind.
+                _release_slot()
+                continue
+
+            # 2. Zero-copy read from shared buffer slot
+            # shm.array is (BUFFER_COUNT, H, W, C)
+            frame_view = shm.array[buf_idx]
+            
+            # COPY frame to local memory to ensure stability during processing?
+            # Actually, if we use Seqlock, we can read directly, but we must check after.
+            # Processing takes 10-30ms. If we process directly on SHM, and it gets overwritten
+            # halfway through, we get garbage results.
+            # Ideally, we make a local copy. It costs memory bandwidth but guarantees atomic analysis.
+            try:
+                frame_copy = frame_view.copy()
+            except Exception:
+                _release_slot()
+                continue
+
+            # 3. Check generation after reading
+            gen_end = slot_generations[buf_idx]
+            
+            if gen_start != gen_end:
+                # Torn frame! Producer wrote to this slot while we were copying.
+                # Discard.
                 try:
-                    # Get next frame task
-                    # task: (frame_idx, timestamp)
-                    task = input_queue.get(timeout=0.1)
-                except queue.Empty:
-                    continue
-                
-                if task is None: # Sentinel
-                    break
-                    
-                frame_idx, timestamp = task
-                
-                # Zero-copy read from shared buffer
-                # Note: We must treat this as read-only or copy if we modify it
-                # tracker.process_frame DOES modify (for splits), so we copy for safety here
-                # Optimization: Modify tracker to not need copy if possible, but 
-                # copying a 1280x720 array in memory is still way faster than pickling it.
-                # Actually, process_frame uses cv2.split which creates copies anyway.
-                # So we can pass the view directly if we are careful.
-                frame_view = shm.array
-                
+                    output_queue.put(("LOG", "ERROR", f"Dropped torn frame {frame_idx}"))
+                except Exception:
+                    pass
+                _release_slot()
+                continue
+
+            try:
+                results, mask = tracker.process_frame(frame_copy, timestamp)
+
+                # Write mask to Shared Memory if valid
+                if mask is not None and mask_shm is not None:
+                    try:
+                        # Ensure mask is uint8 and single channel
+                        if len(mask.shape) == 2:
+                            mask_shm.array[buf_idx][:, :] = mask[:, :]
+                        elif len(mask.shape) == 3:
+                            mask_shm.array[buf_idx][:, :] = mask[:, :, 0]
+                    except Exception as e:
+                        output_queue.put(("LOG", "ERROR", f"Mask Write Error: {e}"))
+
+                # Signal completion
+                # We send just metadata; consumer reads mask from SHM if needed
+                output_queue.put((results, frame_idx, timestamp, buf_idx))
+
+            except Exception as e:
+                # Log error back to main process
                 try:
-                    results, mask = tracker.process_frame(frame_view, timestamp)
-                    
-                    # We can't send the mask (numpy array) back efficiently without another SHM
-                    # For now, we just skip sending the mask back to keep it fast.
-                    # If we need debug mask in UI, we'd use a second SHM buffer.
-                    output_queue.put((results, frame_idx, timestamp))
-                    
-                except Exception as e:
-                    # Don't crash the worker
-                    print(f"CV Process Error: {e}")
+                    output_queue.put(("LOG", "ERROR", f"CV Logic Error: {e}"))
+                except Exception:
+                    pass
+                _release_slot()
                     
     except Exception as e:
-        print(f"CV Process Fatal Error: {e}")
+        # Fatal setup error
+        if output_queue:
+            output_queue.put(("LOG", "ERROR", f"CV Process Fatal: {e}"))
+    finally:
+        if shm: shm.cleanup()
+        if mask_shm: mask_shm.cleanup()

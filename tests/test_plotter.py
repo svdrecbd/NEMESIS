@@ -1,4 +1,3 @@
-import pytest
 import matplotlib.pyplot as plt
 from app.core.plotter import make_figure
 

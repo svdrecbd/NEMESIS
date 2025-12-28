@@ -1,6 +1,4 @@
-import pytest
 import numpy as np
-import cv2
 import os
 from app.core.video import VideoRecorder
 

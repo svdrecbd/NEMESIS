@@ -1,7 +1,6 @@
-import pytest
 import numpy as np
 import cv2
-from app.core.cvbot import StentorTracker, StentorState
+from app.core.cvbot import StentorTracker
 
 def create_synthetic_stentor(size=(100, 100), center=(50, 50), radius=10, color=(0, 255, 0)):
     """Creates a white frame with a colored circle (simulating a Stentor)."""

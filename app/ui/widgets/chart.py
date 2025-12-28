@@ -5,15 +5,43 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.ticker import MultipleLocator
-from PySide6.QtWidgets import QWidget
-from app.ui.theme import apply_matplotlib_theme, active_theme, HEATMAP_PALETTES
+from app.ui.theme import active_theme, HEATMAP_PALETTES
 from app.core.logger import APP_LOGGER
 
-def apply_matplotlib_theme_wrapper(font_family: str | None, theme: dict[str, str]):
-    # Wrapper to avoid circular imports or direct dependency on main logic if possible
-    # Assuming apply_matplotlib_theme is in app.ui.theme
-    from app.ui.theme import apply_matplotlib_theme
-    apply_matplotlib_theme(font_family, theme)
+CHART_FIGSIZE = (6.2, 3.2)
+CHART_MIN_HEIGHT = 160
+STANDARD_SUBPLOT_ADJUST = dict(top=0.82, bottom=0.18, left=0.10, right=0.98, hspace=0.12)
+LONG_SUBPLOT_ADJUST = dict(top=0.90, bottom=0.10, left=0.10, right=0.98)
+LONG_HEATMAP_SUBPLOT_ADJUST = dict(top=0.90, bottom=0.10, left=0.10, right=0.92)
+LONG_RUN_THRESHOLD_S = 3 * 3600.0
+SECONDS_PER_MIN = 60.0
+SECONDS_PER_HOUR = 3600.0
+MINUTES_PER_HOUR = 60
+STANDARD_X_LIMIT_DEFAULT_MIN = 60.0
+STANDARD_X_LIMIT_MAX_MIN = 180.0
+STANDARD_X_LIMIT_MARGIN = 1.05
+STANDARD_MAJOR_TICK_MIN = 10
+STANDARD_MINOR_TICK_MIN = 1
+STANDARD_Y_LIMITS = (-5, 105)
+HIGHLIGHT_EVERY = 10
+LONG_RASTER_X_TICK_STEP = 5
+LONG_RASTER_X_LIMIT = (-0.5, 59.5)
+LONG_RASTER_EPS = 1e-9
+HEATMAP_VMIN = 0.0
+HEATMAP_VMAX = 100.0
+HEATMAP_X_TICK_STEP = 5
+TITLE_FONT_SIZE = 10
+TITLE_Y_STANDARD = 0.98
+TITLE_Y_LONG = 0.97
+GRID_ALPHA_MAJOR = 0.9
+GRID_ALPHA_MINOR = 0.35
+GRID_ALPHA_LONG = 0.25
+HEATMAP_CBAR_PAD = 0.02
+HEATMAP_CBAR_FRACTION = 0.05
+GRID_LINE_OFFSET = 0.5
+HEATMAP_GRID_LINEWIDTH = 0.35
+HEATMAP_GRID_ALPHA = 0.2
+DEFAULT_DPI = 300
 
 class LiveChart:
     PALETTES = HEATMAP_PALETTES
@@ -25,18 +53,18 @@ class LiveChart:
         apply_matplotlib_theme(font_family, theme)
         
         self.fig, (self.ax_top, self.ax_bot) = plt.subplots(
-            2, 1, sharex=True, figsize=(6.2, 3.2),
+            2, 1, sharex=True, figsize=CHART_FIGSIZE,
             gridspec_kw={"height_ratios": [1, 5]}
         )
         # Compact layout and tighter suptitle position to reduce top padding
         try:
-            self.fig.subplots_adjust(top=0.82, bottom=0.18, left=0.10, right=0.98, hspace=0.12)
+            self.fig.subplots_adjust(**STANDARD_SUBPLOT_ADJUST)
         except Exception as e:
             APP_LOGGER.error(f"LiveChart subplots_adjust error: {e}")
             
         self.canvas = FigureCanvas(self.fig)
         # Reduce minimum height so the preview keeps priority
-        self.canvas.setMinimumHeight(160)
+        self.canvas.setMinimumHeight(CHART_MIN_HEIGHT)
         try:
             # Canvas transparent; outer QFrame draws the border/background
             self.canvas.setStyleSheet("background: transparent;")
@@ -60,7 +88,7 @@ class LiveChart:
 
     def _init_axes(self):
         text_color = self.color("TEXT")
-        self.fig.suptitle("Stentor Habituation to Stimuli", fontsize=10, color=text_color, y=0.98)
+        self.fig.suptitle("Stentor Habituation to Stimuli", fontsize=TITLE_FONT_SIZE, color=text_color, y=TITLE_Y_STANDARD)
         try:
             self.fig.patch.set_alpha(0.0)
             self.fig.patch.set_facecolor('none')
@@ -172,7 +200,7 @@ class LiveChart:
             self.canvas.draw_idle()
             return
 
-        long_mode = max_elapsed_sec >= 3 * 3600
+        long_mode = max_elapsed_sec >= LONG_RUN_THRESHOLD_S
         heatmap_on = False
         if long_mode:
             if self._long_run_view == "contraction":
@@ -215,7 +243,7 @@ class LiveChart:
         ax_top.set_title("")
 
         ax_bot.set_ylabel("% Contracted")
-        ax_bot.set_ylim(-5, 105)
+        ax_bot.set_ylim(*STANDARD_Y_LIMITS)
         ax_bot.yaxis.set_major_formatter(plt.FuncFormatter("{:.0f}%".format))
         ax_bot.tick_params(axis='x', colors=text_color)
         ax_bot.tick_params(axis='y', colors=text_color)
@@ -223,30 +251,30 @@ class LiveChart:
             spine.set_color(text_color)
         ax_bot.set_title("")
 
-        minutes_span = max_elapsed_sec / 60.0 if max_elapsed_sec else 0.0
-        default_limit = 60.0
-        target_limit = minutes_span * 1.05 if minutes_span else default_limit
-        max_unit_val = max(default_limit, min(180.0, target_limit))
+        minutes_span = max_elapsed_sec / SECONDS_PER_MIN if max_elapsed_sec else 0.0
+        default_limit = STANDARD_X_LIMIT_DEFAULT_MIN
+        target_limit = minutes_span * STANDARD_X_LIMIT_MARGIN if minutes_span else default_limit
+        max_unit_val = max(default_limit, min(STANDARD_X_LIMIT_MAX_MIN, target_limit))
 
-        major = MultipleLocator(10)
-        minor = MultipleLocator(1)
+        major = MultipleLocator(STANDARD_MAJOR_TICK_MIN)
+        minor = MultipleLocator(STANDARD_MINOR_TICK_MIN)
         ax_top.xaxis.set_major_locator(major)
         ax_top.xaxis.set_minor_locator(minor)
-        ax_bot.xaxis.set_major_locator(MultipleLocator(10))
-        ax_bot.xaxis.set_minor_locator(MultipleLocator(1))
+        ax_bot.xaxis.set_major_locator(MultipleLocator(STANDARD_MAJOR_TICK_MIN))
+        ax_bot.xaxis.set_minor_locator(MultipleLocator(STANDARD_MINOR_TICK_MIN))
         ax_bot.set_xlabel("Time (minutes)")
-        ax_top.grid(True, which="major", axis="x", linestyle=":", alpha=0.9)
-        ax_top.grid(True, which="minor", axis="x", linestyle=":", alpha=0.35)
-        ax_bot.grid(True, which="major", axis="x", linestyle=":", alpha=0.9)
-        ax_bot.grid(True, which="minor", axis="x", linestyle=":", alpha=0.35)
+        ax_top.grid(True, which="major", axis="x", linestyle=":", alpha=GRID_ALPHA_MAJOR)
+        ax_top.grid(True, which="minor", axis="x", linestyle=":", alpha=GRID_ALPHA_MINOR)
+        ax_bot.grid(True, which="major", axis="x", linestyle=":", alpha=GRID_ALPHA_MAJOR)
+        ax_bot.grid(True, which="minor", axis="x", linestyle=":", alpha=GRID_ALPHA_MINOR)
 
         ax_top.set_xlim(0, max_unit_val)
         ax_bot.set_xlim(0, max_unit_val)
         self._time_unit = "minutes"
         self._last_max_elapsed_sec = max_elapsed_sec
         try:
-            self.fig.subplots_adjust(top=0.82, bottom=0.18, left=0.10, right=0.98, hspace=0.12)
-            self.fig.suptitle("Stentor Habituation to Stimuli", fontsize=10, color=text_color, y=0.98)
+            self.fig.subplots_adjust(**STANDARD_SUBPLOT_ADJUST)
+            self.fig.suptitle("Stentor Habituation to Stimuli", fontsize=TITLE_FONT_SIZE, color=text_color, y=TITLE_Y_STANDARD)
         except Exception as e:
             APP_LOGGER.error(f"Error adjusting subplots or suptitle: {e}")
 
@@ -278,8 +306,8 @@ class LiveChart:
         self._time_unit = "hours"
         self._last_max_elapsed_sec = max_elapsed_sec
         try:
-            self.fig.subplots_adjust(top=0.90, bottom=0.10, left=0.10, right=0.98)
-            self.fig.suptitle("Tap raster by hour", fontsize=10, color=text_color, y=0.97)
+            self.fig.subplots_adjust(**LONG_SUBPLOT_ADJUST)
+            self.fig.suptitle("Tap raster by hour", fontsize=TITLE_FONT_SIZE, color=text_color, y=TITLE_Y_LONG)
         except Exception as e:
             APP_LOGGER.error(f"Error adjusting subplots (long raster): {e}")
 
@@ -307,8 +335,8 @@ class LiveChart:
 
         self._time_unit = "hours"
         try:
-            self.fig.subplots_adjust(top=0.90, bottom=0.10, left=0.10, right=0.92)
-            self.fig.suptitle("Contraction heatmap", fontsize=10, color=text_color, y=0.97)
+            self.fig.subplots_adjust(**LONG_HEATMAP_SUBPLOT_ADJUST)
+            self.fig.suptitle("Contraction heatmap", fontsize=TITLE_FONT_SIZE, color=text_color, y=TITLE_Y_LONG)
         except Exception as e:
             APP_LOGGER.error(f"Error adjusting subplots (long heatmap): {e}")
 
@@ -317,10 +345,10 @@ class LiveChart:
         accent_color = self.color("ACCENT")
         remaining_color = self.color("SUBTXT")
 
-        factor = 60.0
+        factor = SECONDS_PER_MIN
         ts_unit = [t / factor for t in self.times_sec]
-        highlighted = [t for i, t in enumerate(ts_unit) if (i + 1) % 10 == 0]
-        regular = [t for i, t in enumerate(ts_unit) if (i + 1) % 10 != 0]
+        highlighted = [t for i, t in enumerate(ts_unit) if (i + 1) % HIGHLIGHT_EVERY == 0]
+        regular = [t for i, t in enumerate(ts_unit) if (i + 1) % HIGHLIGHT_EVERY != 0]
 
         if self.replay_targets:
             replay_unit = [t / factor for t in self.replay_targets]
@@ -375,7 +403,7 @@ class LiveChart:
             return
 
         max_sec = max(max_elapsed_sec, float(reference.max()))
-        hours = max(1, int(math.ceil((max_sec + 1e-9) / 3600.0)))
+        hours = max(1, int(math.ceil((max_sec + LONG_RASTER_EPS) / SECONDS_PER_HOUR)))
         line_offsets = np.arange(hours)
 
         regular_groups = [[] for _ in range(hours)]
@@ -383,9 +411,9 @@ class LiveChart:
         pending_groups = [[] for _ in range(hours)]
 
         for idx, value in enumerate(taps_actual):
-            hour = min(int(value // 3600), hours - 1)
-            minute_within_hour = (value % 3600.0) / 60.0
-            if (idx + 1) % 10 == 0:
+            hour = min(int(value // SECONDS_PER_HOUR), hours - 1)
+            minute_within_hour = (value % SECONDS_PER_HOUR) / SECONDS_PER_MIN
+            if (idx + 1) % HIGHLIGHT_EVERY == 0:
                 highlight_groups[hour].append(minute_within_hour)
             else:
                 regular_groups[hour].append(minute_within_hour)
@@ -394,8 +422,8 @@ class LiveChart:
             for idx, value in enumerate(taps_script):
                 if idx < self.replay_completed:
                     continue
-                hour = min(int(value // 3600), hours - 1)
-                minute_within_hour = (value % 3600.0) / 60.0
+                hour = min(int(value // SECONDS_PER_HOUR), hours - 1)
+                minute_within_hour = (value % SECONDS_PER_HOUR) / SECONDS_PER_MIN
                 pending_groups[hour].append(minute_within_hour)
 
         ax.cla()
@@ -436,9 +464,9 @@ class LiveChart:
         ax.set_yticks(line_offsets)
         ax.set_yticklabels([f"H{h:02d}" for h in range(hours)])
         ax.invert_yaxis()
-        ax.set_xlim(-0.5, 59.5)
-        ax.set_xticks(np.arange(0, 60, 5))
-        ax.grid(axis="x", which="major", linestyle=":", alpha=0.25)
+        ax.set_xlim(*LONG_RASTER_X_LIMIT)
+        ax.set_xticks(np.arange(0, MINUTES_PER_HOUR, LONG_RASTER_X_TICK_STEP))
+        ax.grid(axis="x", which="major", linestyle=":", alpha=GRID_ALPHA_LONG)
 
     def _draw_contraction_heatmap(self) -> None:
         ax = self.ax_top
@@ -449,7 +477,12 @@ class LiveChart:
 
         data = self.contraction_heatmap
         try:
-            self.fig.suptitle(f"Contraction heatmap — {self.heatmap_palette.title()}", fontsize=10, color=text_color, y=0.97)
+            self.fig.suptitle(
+                f"Contraction heatmap — {self.heatmap_palette.title()}",
+                fontsize=TITLE_FONT_SIZE,
+                color=text_color,
+                y=TITLE_Y_LONG,
+            )
         except Exception as e:
             APP_LOGGER.error(f"Error setting suptitle: {e}")
         if data is None or data.size == 0:
@@ -488,12 +521,12 @@ class LiveChart:
             aspect="auto",
             interpolation="nearest",
             cmap=cmap_name,
-            vmin=0.0,
-            vmax=100.0,
+            vmin=HEATMAP_VMIN,
+            vmax=HEATMAP_VMAX,
         )
         self._heatmap_im = img
         if self._heatmap_cbar is None:
-            self._heatmap_cbar = self.fig.colorbar(img, ax=ax, pad=0.02, fraction=0.05)
+            self._heatmap_cbar = self.fig.colorbar(img, ax=ax, pad=HEATMAP_CBAR_PAD, fraction=HEATMAP_CBAR_FRACTION)
         else:
             try:
                 self._heatmap_cbar.update_normal(img)
@@ -511,16 +544,21 @@ class LiveChart:
         ax.set_yticks(np.arange(hours))
         ax.set_yticklabels([f"H{h:02d}" for h in range(hours)])
         ax.invert_yaxis()
-        ax.set_xlim(-0.5, 59.5)
-        ax.set_xticks(np.arange(0, 60, 5))
+        ax.set_xlim(*LONG_RASTER_X_LIMIT)
+        ax.set_xticks(np.arange(0, MINUTES_PER_HOUR, HEATMAP_X_TICK_STEP))
         ax.set_xlabel("Minute within hour")
         ax.set_ylabel("Hour")
         for spine in ax.spines.values():
             spine.set_color(text_color)
         ax.tick_params(axis='x', colors=text_color)
         ax.tick_params(axis='y', colors=text_color)
-        for x in range(0, 60, 5):
-            ax.axvline(x - 0.5, color=self.color("GRID"), linewidth=0.35, alpha=0.2)
+        for x in range(0, MINUTES_PER_HOUR, HEATMAP_X_TICK_STEP):
+            ax.axvline(
+                x - GRID_LINE_OFFSET,
+                color=self.color("GRID"),
+                linewidth=HEATMAP_GRID_LINEWIDTH,
+                alpha=HEATMAP_GRID_ALPHA,
+            )
 
     def set_heatmap_palette(self, palette: str) -> None:
         candidate = (palette or "").strip().lower()
@@ -541,7 +579,12 @@ class LiveChart:
                 else:
                     self._redraw()
                 try:
-                    self.fig.suptitle(f"Contraction heatmap — {self.heatmap_palette.title()}", fontsize=10, color=self.color("TEXT"), y=0.97)
+                    self.fig.suptitle(
+                        f"Contraction heatmap — {self.heatmap_palette.title()}",
+                        fontsize=TITLE_FONT_SIZE,
+                        color=self.color("TEXT"),
+                        y=TITLE_Y_LONG,
+                    )
                 except Exception:
                     pass
                 self.canvas.draw_idle()
@@ -551,7 +594,7 @@ class LiveChart:
     def heatmap_active(self) -> bool:
         return self._heatmap_active
 
-    def save(self, path: str, dpi: int = 300) -> None:
+    def save(self, path: str, dpi: int = DEFAULT_DPI) -> None:
         self.fig.savefig(path, dpi=dpi, bbox_inches='tight')
 
     def color(self, key: str) -> str:

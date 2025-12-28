@@ -1,15 +1,16 @@
 # app/main.py
 import sys
 from PySide6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QTabWidget, QPushButton, QMenu, QStyleFactory, QTabBar, QStylePainter, QStyleOptionTab, QStyle, QMessageBox, QToolButton
+    QApplication, QWidget, QVBoxLayout, QTabWidget, QPushButton, QMenu, QStyleFactory, QTabBar, QToolButton
 )
-from PySide6.QtCore import Qt, QSize, Slot, QPoint, QObject, QUrl
-from PySide6.QtGui import QIcon, QPalette, QDesktopServices, QColor
+from PySide6.QtCore import Qt, Slot, QPoint, QObject
+from PySide6.QtGui import QIcon
 
-from app.core.paths import BASE_DIR, LOGO_PATH, FONT_PATH, get_resource_path
+from app.core.paths import LOGO_PATH, FONT_PATH
+from app.core.version import APP_VERSION
 from app.ui.theme import (
-    build_stylesheet, active_theme, set_active_theme, build_stylesheet, 
-    BG, TEXT, MID, BORDER, BUTTON_BORDER, ACCENT, _ACTIVE_THEME_NAME, DEFAULT_THEME_NAME, THEMES, set_macos_titlebar_appearance
+    build_stylesheet, active_theme, set_active_theme,
+    BG, TEXT, MID, BORDER, ACCENT
 )
 from app.ui.tabs.run_tab import RunTab, ResourceRegistry
 from app.ui.tabs.dashboard import DashboardTab
@@ -17,10 +18,17 @@ from app.core.logger import APP_LOGGER
 from app.ui.widgets.viewer import AppZoomView
 from app.ui.widgets.containers import LeftAlignTabBar
 
-# Version
-APP_VERSION = "1.0-rc1"
 _APP_ICON = None
 _FONT_FAMILY = "Typestar OCR Regular"
+APP_DEFAULT_SIZE = (1320, 820)
+APP_MIN_SIZE = (1280, 780)
+APP_ICON_SIZES = (16, 32, 64, 128, 256)
+TAB_CLOSE_BUTTON_SIZE = 12
+TAB_CLOSE_FONT_PX = 10
+CORNER_BTN_MARGIN_PX = 6
+CORNER_BTN_PADDING_PX = (4, 12)
+APP_FONT_PT = 11
+ICON_ALPHA_THRESHOLD = 10
 
 def _apply_global_font(app: QApplication):
     """Load Typestar OCR and apply as app default if present."""
@@ -31,10 +39,10 @@ def _apply_global_font(app: QApplication):
         fams = QFontDatabase.applicationFontFamilies(fid)
         if fams:
             _FONT_FAMILY = fams[0]
-            app.setFont(QFont(_FONT_FAMILY, 11))
+            app.setFont(QFont(_FONT_FAMILY, APP_FONT_PT))
 
 def build_app_icon():
-    from PySide6.QtGui import QImage, QPixmap, QPainter, QIcon
+    from PySide6.QtGui import QImage, QPixmap, QPainter
     from PySide6.QtCore import QRect
     try:
         image = QImage(str(LOGO_PATH))
@@ -46,7 +54,7 @@ def build_app_icon():
         max_x, max_y = -1, -1
         for y in range(height):
             for x in range(width):
-                if image.pixelColor(x, y).alpha() > 10:
+                if image.pixelColor(x, y).alpha() > ICON_ALPHA_THRESHOLD:
                     if x < min_x:
                         min_x = x
                     if x > max_x:
@@ -74,7 +82,7 @@ def build_app_icon():
             painter.end()
         base_pix = QPixmap.fromImage(square)
         icon = QIcon()
-        for target in (16, 32, 64, 128, 256):
+        for target in APP_ICON_SIZES:
             icon.addPixmap(base_pix.scaled(target, target, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         return icon
     except Exception as e:
@@ -88,8 +96,8 @@ class App(QWidget):
         self.setWindowTitle(f"NEMESIS {APP_VERSION} — Non-periodic Event Monitoring & Evaluation of Stimulus-Induced States")
         if _APP_ICON is not None:
             self.setWindowIcon(_APP_ICON)
-        self.resize(1320, 820)
-        self.setMinimumSize(1280, 780)
+        self.resize(*APP_DEFAULT_SIZE)
+        self.setMinimumSize(*APP_MIN_SIZE)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -207,6 +215,16 @@ class App(QWidget):
             self._tab_chord_active = False
             self._tab_chord_triggered = False
         super().keyReleaseEvent(event)
+
+    def closeEvent(self, event):
+        for idx in range(self.tab_widget.count()):
+            widget = self.tab_widget.widget(idx)
+            if isinstance(widget, RunTab):
+                try:
+                    widget.shutdown()
+                except Exception:
+                    pass
+        super().closeEvent(event)
 
     def _register_run_tab(self, tab: RunTab):
         try:
@@ -374,13 +392,13 @@ class App(QWidget):
 
     def _style_tab_close_button(self, button: QToolButton):
         theme = active_theme()
-        button.setFixedSize(12, 12)
+        button.setFixedSize(TAB_CLOSE_BUTTON_SIZE, TAB_CLOSE_BUTTON_SIZE)
         button.setStyleSheet(
             "QToolButton {"
             "border: none;"
             "background: transparent;"
             f"color: {theme.get('TEXT', TEXT)};"
-            "font-size: 10px;"
+            f"font-size: {TAB_CLOSE_FONT_PX}px;"
             "padding: 0px;"
             "margin: 0px;"
             "}"
@@ -423,8 +441,8 @@ class App(QWidget):
         hover_fg = theme.get("BG", BG)
         style = f"""
         QPushButton {{
-            margin: 6px;
-            padding: 4px 12px;
+            margin: {CORNER_BTN_MARGIN_PX}px;
+            padding: {CORNER_BTN_PADDING_PX[0]}px {CORNER_BTN_PADDING_PX[1]}px;
             border-radius: 0px;
             border: 1px solid {border};
             background: {base_bg};

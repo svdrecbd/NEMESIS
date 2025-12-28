@@ -27,7 +27,31 @@ const uint8_t PIN_MODE_SWITCH = 10;
 
 const int LARGE_TAP_STEPS = 9;
 const int MANUAL_JOG_STEPS = 9;
+const int MIN_STEPSIZE = 1;
+const int MAX_STEPSIZE = 5;
+const int DEFAULT_STEPSIZE = 4;
+const unsigned long SERIAL_BAUD = 9600;
 const unsigned long DEBOUNCE_MS = 50; // Debounce time for hardware inputs
+const unsigned long SERIAL_CONFIG_TIMEOUT_MS = 5000;
+const unsigned long SERIAL_PROMPT_DELAY_MS = 100;
+const size_t CONFIG_BUFFER_SIZE = 48;
+const uint8_t SERIAL_TIME_PRECISION = 3;
+const uint8_t PERIOD_PRECISION = 4;
+const unsigned long SERIAL_POLL_DELAY_MS = 1;
+const float MIN_INTERVAL_MS = 1.0f;
+const unsigned long MS_PER_SEC = 1000UL;
+const unsigned long MICROS_PER_MS = 1000UL;
+const unsigned long MICROS_PER_SEC = 1000000UL;
+const float SECONDS_PER_MIN = 60.0f;
+const float MS_PER_MIN = 60000.0f;
+const unsigned long MIN_INTERVAL_US = 1000UL;
+const float MIN_PERIOD_US_FLOAT = 1.0f;
+const float RANDOM_U_DENOM = 10000.0f;
+const long RANDOM_U_MIN = 1;
+const long RANDOM_U_MAX_EXCLUSIVE = 10001;
+const unsigned long DEFAULT_PERIOD_US = 1000000UL;
+const double DEFAULT_PERIOD_US_FLOAT = 1000000.0;
+const unsigned long STEP_PULSE_DELAY_MS = 1;
 
 // Global Variables & Data Structures
 
@@ -55,9 +79,9 @@ struct Session {
 Session session;
 
 // Mode-specific Parameters
-int stepsize = 4; // Default to 1/8th microstep
-double periodicDelayUsFloat = 1000000.0;
-unsigned long periodicDelayUsBase = 1000000UL;
+int stepsize = DEFAULT_STEPSIZE; // Default to 1/8th microstep
+double periodicDelayUsFloat = DEFAULT_PERIOD_US_FLOAT;
+unsigned long periodicDelayUsBase = DEFAULT_PERIOD_US;
 double periodicDelayUsFraction = 0.0;
 double periodicDelayUsAccumulator = 0.0;
 float lambda = 0.0; // Taps per millisecond for random mode
@@ -80,6 +104,7 @@ void executeTapProfile(int steps, int ms1, int ms2, int ms3);
 void printFormattedTime(unsigned long total_ms);
 void resetBEDPins();
 void printHelp();
+bool waitForSerialInput(unsigned long timeout_ms);
 
 // SETUP FUNCTION
 void setup() {
@@ -96,7 +121,7 @@ void setup() {
   randomSeed(analogRead(0));
 
   resetBEDPins();
-  Serial.begin(9600);
+  Serial.begin(SERIAL_BAUD);
   Serial.println(F("Begin Stentor Habituation Device operation"));
   printHelp();
 }
@@ -188,7 +213,7 @@ void checkSerialInput() {
 }
 
 void processHostConfig() {
-  char buffer[48];
+  char buffer[CONFIG_BUFFER_SIZE];
   size_t len = Serial.readBytesUntil('\n', buffer, sizeof(buffer) - 1);
   buffer[len] = '\0';
 
@@ -223,8 +248,8 @@ void processHostConfig() {
   *cursor = '\0';
 
   int parsedStep = atoi(stepToken);
-  if (parsedStep < 1) parsedStep = 1;
-  if (parsedStep > 5) parsedStep = 5;
+  if (parsedStep < MIN_STEPSIZE) parsedStep = MIN_STEPSIZE;
+  if (parsedStep > MAX_STEPSIZE) parsedStep = MAX_STEPSIZE;
 
   double parsedValue = atof(valueToken);
   bool ok = true;
@@ -242,15 +267,15 @@ void processHostConfig() {
       ok = false;
     }
     if (ok) {
-      periodicDelayUsFloat = parsedValue * 1000000.0;
-      if (periodicDelayUsFloat < 1.0) {
-        periodicDelayUsFloat = 1.0;
+      periodicDelayUsFloat = parsedValue * MICROS_PER_SEC;
+      if (periodicDelayUsFloat < MIN_PERIOD_US_FLOAT) {
+        periodicDelayUsFloat = MIN_PERIOD_US_FLOAT;
       }
       periodicDelayUsBase = (unsigned long)periodicDelayUsFloat;
       periodicDelayUsFraction = periodicDelayUsFloat - periodicDelayUsBase;
       periodicDelayUsAccumulator = 0.0;
       Serial.print(F("CONFIG:OK,MODE=P,PERIOD_MS="));
-      Serial.println(periodicDelayUsFloat / 1000.0, 4);
+      Serial.println(periodicDelayUsFloat / MICROS_PER_MS, PERIOD_PRECISION);
     }
   } else if (modeChar == 'R') {
     hostReplayMode = false;
@@ -261,9 +286,9 @@ void processHostConfig() {
       ok = false;
     }
     if (ok) {
-      lambda = parsedValue / 60000.0f;
+      lambda = parsedValue / MS_PER_MIN;
       Serial.print(F("CONFIG:OK,MODE=R,RATE_PER_MIN="));
-      Serial.println(parsedValue, 4);
+      Serial.println(parsedValue, PERIOD_PRECISION);
     }
   } else if (modeChar == 'H') {
     hostReplayMode = true;
@@ -307,7 +332,7 @@ void checkTimedPulse() {
   }
 
   unsigned long tapStartMicros = nowMicros;
-  unsigned long tapStartMs = tapStartMicros / 1000UL;
+  unsigned long tapStartMs = tapStartMicros / MICROS_PER_MS;
 
   if (session.tapCount == 0) {
     session.startTimeMs = tapStartMs;
@@ -327,18 +352,18 @@ void checkTimedPulse() {
   }
 
   if (currentMode == Mode::Random) {
-    float U = random(1, 10001) / 10000.0f;
+    float U = random(RANDOM_U_MIN, RANDOM_U_MAX_EXCLUSIVE) / RANDOM_U_DENOM;
     double intervalMs = -log(U) / lambda;  // milliseconds
-    if (intervalMs < 1.0) {
-      intervalMs = 1.0;
+    if (intervalMs < MIN_INTERVAL_MS) {
+      intervalMs = MIN_INTERVAL_MS;
     }
-    unsigned long intervalUs = (unsigned long)(intervalMs * 1000.0);
+    unsigned long intervalUs = (unsigned long)(intervalMs * MICROS_PER_MS);
     if (intervalUs == 0UL) {
-      intervalUs = 1000UL;
+      intervalUs = MIN_INTERVAL_US;
     }
     session.nextTapMicros = tapStartMicros + intervalUs;
     Serial.print(F("Next random tap scheduled in "));
-    Serial.print(intervalMs / 1000.0, 3);
+    Serial.print(intervalMs / MS_PER_SEC, SERIAL_TIME_PRECISION);
     Serial.println(F(" seconds.\n"));
   } else {
     unsigned long delayUs = periodicDelayUsBase;
@@ -348,8 +373,8 @@ void checkTimedPulse() {
       delayUs += extra;
       periodicDelayUsAccumulator -= extra;
     }
-    if (delayUs < 1000UL) {
-      delayUs = 1000UL;
+    if (delayUs < MIN_INTERVAL_US) {
+      delayUs = MIN_INTERVAL_US;
     }
     session.nextTapMicros = tapStartMicros + delayUs;
   }
@@ -365,31 +390,31 @@ void startTimedMode() {
   Serial.println(F("EVENT:MODE_ACTIVATED"));
 
   unsigned long tapStartMicros = micros();
-  unsigned long tapStartMs = tapStartMicros / 1000UL;
+  unsigned long tapStartMs = tapStartMicros / MICROS_PER_MS;
   deliverTap();
   session.startTimeMs = tapStartMs;
   session.startTimeMicros = tapStartMicros;
   session.tapCount = 1;
 
   if (currentMode == Mode::Random) {
-    float U = random(1, 10001) / 10000.0f;
+    float U = random(RANDOM_U_MIN, RANDOM_U_MAX_EXCLUSIVE) / RANDOM_U_DENOM;
     double intervalMs = -log(U) / lambda;
-    if (intervalMs < 1.0) {
-      intervalMs = 1.0;
+    if (intervalMs < MIN_INTERVAL_MS) {
+      intervalMs = MIN_INTERVAL_MS;
     }
-    unsigned long intervalUs = (unsigned long)(intervalMs * 1000.0);
+    unsigned long intervalUs = (unsigned long)(intervalMs * MICROS_PER_MS);
     if (intervalUs == 0UL) {
-      intervalUs = 1000UL;
+      intervalUs = MIN_INTERVAL_US;
     }
     session.nextTapMicros = tapStartMicros + intervalUs;
     Serial.print(F("Next random tap scheduled in "));
-    Serial.print(intervalMs / 1000.0, 3);
+    Serial.print(intervalMs / MS_PER_SEC, SERIAL_TIME_PRECISION);
     Serial.println(F(" seconds.\n"));
   } else {
     periodicDelayUsAccumulator = 0.0;
     unsigned long delayUs = periodicDelayUsBase;
-    if (delayUs < 1000UL) {
-        delayUs = 1000UL;
+    if (delayUs < MIN_INTERVAL_US) {
+        delayUs = MIN_INTERVAL_US;
     }
     session.nextTapMicros = tapStartMicros + delayUs;
   }
@@ -413,7 +438,7 @@ void stopTimedMode() {
     Serial.print(F("Total Taps Delivered: "));
     Serial.println(session.tapCount);
     if (configuredModeIsRandom && elapsedTime > 0) {
-      float observedRatePerMin = ((float)session.tapCount * 1000.0f / elapsedTime) * 60.0f;
+      float observedRatePerMin = ((float)session.tapCount * MS_PER_SEC / elapsedTime) * SECONDS_PER_MIN;
       Serial.print(F("Observed Average Rate: "));
       Serial.print(observedRatePerMin, 2);
       Serial.println(F(" taps/min"));
@@ -425,30 +450,49 @@ void stopTimedMode() {
 
 // Functions for Handling Serial Commands
 
+bool waitForSerialInput(unsigned long timeout_ms) {
+  unsigned long start = millis();
+  while (Serial.available() == 0) {
+    if (millis() - start >= timeout_ms) {
+      return false;
+    }
+    delay(SERIAL_POLL_DELAY_MS);
+  }
+  return true;
+}
+
 void configurePeriodicMode() {
   stopTimedMode();
   configuredModeIsRandom = false;
   Serial.println(F("\n--- Configuring Periodic Mode ---"));
-  delay(100);
+  delay(SERIAL_PROMPT_DELAY_MS);
   Serial.println(F("Enter the step size (tap power): 1, 2, 3, 4, or 5"));
   Serial.println(F("where 1=full, 2=half, 3=1/4, 4=1/8, 5=1/16"));
-  while (Serial.available() == 0) {}
+  if (!waitForSerialInput(SERIAL_CONFIG_TIMEOUT_MS)) {
+    Serial.println(F("CONFIG:ERR,TIMEOUT"));
+    return;
+  }
   stepsize = Serial.parseInt();
   Serial.print(F("Step size set to ")); Serial.println(stepsize);
 
-  delay(100);
+  delay(SERIAL_PROMPT_DELAY_MS);
   Serial.println(F("Enter the stimulus period in MINUTES:"));
-  while (Serial.available() == 0) {}
+  if (!waitForSerialInput(SERIAL_CONFIG_TIMEOUT_MS)) {
+    Serial.println(F("CONFIG:ERR,TIMEOUT"));
+    return;
+  }
   float time_minutes = Serial.parseFloat();
-  periodicDelayUsFloat = time_minutes * 60.0f * 1000000.0f;
-  if (periodicDelayUsFloat < 1.0f) {
-    periodicDelayUsFloat = 1.0f;
+  periodicDelayUsFloat = time_minutes * SECONDS_PER_MIN * MICROS_PER_SEC;
+  if (periodicDelayUsFloat < MIN_PERIOD_US_FLOAT) {
+    periodicDelayUsFloat = MIN_PERIOD_US_FLOAT;
   }
   periodicDelayUsBase = (unsigned long)periodicDelayUsFloat;
   periodicDelayUsFraction = periodicDelayUsFloat - periodicDelayUsBase;
   periodicDelayUsAccumulator = 0.0;
   Serial.print(F("Time period set to ")); Serial.print(time_minutes); Serial.println(F(" minutes."));
-  Serial.print(F("Which corresponds to a delay of ")); Serial.print(periodicDelayUsFloat / 1000.0, 4); Serial.println(F(" ms."));
+  Serial.print(F("Which corresponds to a delay of "));
+  Serial.print(periodicDelayUsFloat / MICROS_PER_MS, PERIOD_PRECISION);
+  Serial.println(F(" ms."));
   Serial.println(F("Configuration complete. Use the switch to start/stop.\n"));
 }
 
@@ -456,22 +500,28 @@ void configureRandomMode() {
   stopTimedMode();
   configuredModeIsRandom = true;
   Serial.println(F("\n--- Configuring Random (Poisson) Mode ---"));
-  delay(100);
+  delay(SERIAL_PROMPT_DELAY_MS);
   Serial.println(F("Enter the step size (tap power): 1, 2, 3, 4, or 5"));
   Serial.println(F("where 1=full, 2=half, 3=1/4, 4=1/8, 5=1/16"));
-  while (Serial.available() == 0) {}
+  if (!waitForSerialInput(SERIAL_CONFIG_TIMEOUT_MS)) {
+    Serial.println(F("CONFIG:ERR,TIMEOUT"));
+    return;
+  }
   stepsize = Serial.parseInt();
   Serial.print(F("Step size set to: ")); Serial.println(stepsize);
 
-  delay(100);
+  delay(SERIAL_PROMPT_DELAY_MS);
   Serial.println(F("Enter the AVERAGE stimulus rate in taps per MINUTE:"));
-  while (Serial.available() == 0) {}
+  if (!waitForSerialInput(SERIAL_CONFIG_TIMEOUT_MS)) {
+    Serial.println(F("CONFIG:ERR,TIMEOUT"));
+    return;
+  }
   float taps_per_minute = Serial.parseFloat();
-  lambda = taps_per_minute / 60000.0f;
+  lambda = taps_per_minute / MS_PER_MIN;
   Serial.print(F("Average rate set to ")); Serial.print(taps_per_minute); Serial.println(F(" taps/min."));
 
   if (taps_per_minute > 0) {
-    float avg_delay_ms = (1.0f / taps_per_minute) * 60.0f * 1000.0f;
+    float avg_delay_ms = (1.0f / taps_per_minute) * SECONDS_PER_MIN * MS_PER_SEC;
     Serial.print(F("Which corresponds to an AVERAGE delay of "));
     Serial.print((long)avg_delay_ms);
     Serial.println(F(" ms."));
@@ -497,10 +547,10 @@ void raiseArm() {
   digitalWrite(PIN_DIR, LOW);
   digitalWrite(PIN_MS1, HIGH); digitalWrite(PIN_MS2, HIGH); digitalWrite(PIN_MS3, HIGH);
   digitalWrite(PIN_ENABLE, LOW);
-  for (int i = 0; i < MANUAL_JOG_STEPS; i++) { digitalWrite(PIN_STEP, HIGH); delay(1); digitalWrite(PIN_STEP, LOW); delay(1); }
+  for (int i = 0; i < MANUAL_JOG_STEPS; i++) { digitalWrite(PIN_STEP, HIGH); delay(STEP_PULSE_DELAY_MS); digitalWrite(PIN_STEP, LOW); delay(STEP_PULSE_DELAY_MS); }
   resetBEDPins();
   Serial.print(F("EVENT:TAP,"));
-  Serial.println((double)micros() / 1000.0, 3);
+  Serial.println((double)micros() / MICROS_PER_MS, SERIAL_TIME_PRECISION);
 }
 
 void lowerArm() {
@@ -508,7 +558,7 @@ void lowerArm() {
   digitalWrite(PIN_DIR, HIGH);
   digitalWrite(PIN_MS1, HIGH); digitalWrite(PIN_MS2, HIGH); digitalWrite(PIN_MS3, HIGH);
   digitalWrite(PIN_ENABLE, LOW);
-  for (int i = 0; i < MANUAL_JOG_STEPS; i++) { digitalWrite(PIN_STEP, HIGH); delay(1); digitalWrite(PIN_STEP, LOW); delay(1); }
+  for (int i = 0; i < MANUAL_JOG_STEPS; i++) { digitalWrite(PIN_STEP, HIGH); delay(STEP_PULSE_DELAY_MS); digitalWrite(PIN_STEP, LOW); delay(STEP_PULSE_DELAY_MS); }
   resetBEDPins();
 }
 
@@ -528,7 +578,7 @@ void deliverTap() {
 
   resetBEDPins();
   Serial.print(F("EVENT:TAP,"));
-  Serial.println((double)micros() / 1000.0, 3);
+  Serial.println((double)micros() / MICROS_PER_MS, SERIAL_TIME_PRECISION);
 }
 
 void executeTapProfile(int steps, int ms1, int ms2, int ms3) {
@@ -538,21 +588,21 @@ void executeTapProfile(int steps, int ms1, int ms2, int ms3) {
 
   digitalWrite(PIN_DIR, HIGH); // Tap down
   for (int i = 0; i < steps; i++) {
-    digitalWrite(PIN_STEP, HIGH); delay(1);
-    digitalWrite(PIN_STEP, LOW); delay(1);
+    digitalWrite(PIN_STEP, HIGH); delay(STEP_PULSE_DELAY_MS);
+    digitalWrite(PIN_STEP, LOW); delay(STEP_PULSE_DELAY_MS);
   }
   digitalWrite(PIN_DIR, LOW); // Tap up
   for (int i = 0; i < steps; i++) {
-    digitalWrite(PIN_STEP, HIGH); delay(1);
-    digitalWrite(PIN_STEP, LOW); delay(1);
+    digitalWrite(PIN_STEP, HIGH); delay(STEP_PULSE_DELAY_MS);
+    digitalWrite(PIN_STEP, LOW); delay(STEP_PULSE_DELAY_MS);
   }
 }
 
 void printFormattedTime(unsigned long total_ms) {
-  unsigned long all_seconds = total_ms / 1000;
-  unsigned long all_minutes = all_seconds / 60;
-  unsigned long display_ms = total_ms % 1000;
-  unsigned long display_s = all_seconds % 60;
+  unsigned long all_seconds = total_ms / MS_PER_SEC;
+  unsigned long all_minutes = all_seconds / static_cast<unsigned long>(SECONDS_PER_MIN);
+  unsigned long display_ms = total_ms % MS_PER_SEC;
+  unsigned long display_s = all_seconds % static_cast<unsigned long>(SECONDS_PER_MIN);
 
   Serial.print(all_minutes);
   Serial.print(F("m "));

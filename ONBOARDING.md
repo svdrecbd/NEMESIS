@@ -100,3 +100,6 @@ The project includes a comprehensive test suite using `pytest`.
 1.  Update the version string in `VERSION` and `app/main.py`.
 2.  Verify the `nemesis.spec` file encompasses new dependencies.
 3.  Build the standalone executable using PyInstaller.
+
+## Future Work
+*   **UNIT1 Firmware/Protocol**: The UNIT1 path (`firmware/unit1/` and `docs/protocol.md`) is experimental and not part of the current release. Keep Arduino (`firmware/arduino/`) as the supported production target until UNIT1 is fully implemented and validated.

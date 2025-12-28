@@ -8,6 +8,10 @@ from typing import Optional, Deque
 from . import scheduler
 from ..drivers.arduino_driver import SerialLink
 
+RECENT_INTERVALS_MAXLEN = 10
+SECONDS_PER_MIN = 60.0
+DEFAULT_PREVIEW_SIZE = (0, 0)
+
 
 @dataclass
 class RunSession:
@@ -39,9 +43,9 @@ class RunSession:
     last_host_tap_monotonic: Optional[float] = None
     active_serial_port: str = ""
     camera_index: Optional[int] = None
-    preview_size: tuple[int, int] = (0, 0)
+    preview_size: tuple[int, int] = DEFAULT_PREVIEW_SIZE
 
-    recent_intervals: Deque[float] = field(default_factory=lambda: deque(maxlen=10))
+    recent_intervals: Deque[float] = field(default_factory=lambda: deque(maxlen=RECENT_INTERVALS_MAXLEN))
     last_tap_timestamp: Optional[float] = None
     preview_frame_counter: int = 0
     recorded_frame_counter: int = 0
@@ -107,7 +111,7 @@ class RunSession:
         avg_interval = sum(self.recent_intervals) / len(self.recent_intervals)
         if avg_interval <= 0:
             return None
-        return 60.0 / avg_interval
+        return SECONDS_PER_MIN / avg_interval
 
     def reset_frame_counters(self) -> None:
         self.preview_frame_counter = 0

@@ -1,7 +1,5 @@
-import pytest
 import csv
-import json
-from pathlib import Path
+import pytest
 from app.core.analyzer import RunAnalyzer
 
 @pytest.fixture

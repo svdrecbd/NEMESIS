@@ -1,8 +1,12 @@
 import csv
 import json
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Optional, Dict
 from app.core.logger import APP_LOGGER
+
+DEFAULT_RESPONSE_WINDOW_S = 2.0
+MS_PER_SEC = 1000.0
+PERCENT_SCALE = 100.0
 
 class RunAnalyzer:
     """
@@ -15,7 +19,7 @@ class RunAnalyzer:
         self.tracking_path = run_dir / "tracking.csv"
         self.output_path = run_dir / "analysis.json"
 
-    def analyze(self, response_window_s: float = 2.0) -> Optional[Dict]:
+    def analyze(self, response_window_s: float = DEFAULT_RESPONSE_WINDOW_S) -> Optional[Dict]:
         """
         Generates analysis.json containing response rates for each tap.
         response_window_s: Time window after tap to check for contraction.
@@ -36,7 +40,7 @@ class RunAnalyzer:
                 for row in reader:
                     try:
                         # t_host_ms is monotonic time in ms
-                        t_sec = float(row['t_host_ms']) / 1000.0
+                        t_sec = float(row['t_host_ms']) / MS_PER_SEC
                         taps.append({
                             'id': row['tap_id'],
                             'time': t_sec,
@@ -105,7 +109,7 @@ class RunAnalyzer:
             
             total = len(visible_ids)
             responded = len(contracted_ids)
-            pct = (responded / total * 100.0) if total > 0 else 0.0
+            pct = (responded / total * PERCENT_SCALE) if total > 0 else 0.0
             
             analyzed_taps.append({
                 "tap_id": tap['id'],

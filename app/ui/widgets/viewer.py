@@ -1,13 +1,33 @@
 # app/ui/widgets/viewer.py
 from PySide6.QtWidgets import (
     QWidget, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, 
-    QVBoxLayout, QSizePolicy, QGraphicsProxyWidget
+    QVBoxLayout, QGraphicsProxyWidget
 )
-from PySide6.QtCore import Qt, Signal, QSize, QTimer, QEvent, QRect
-from PySide6.QtGui import QPainter, QColor, QPixmap, QImage, QIcon
+from PySide6.QtCore import Qt, Signal, QSize, QTimer, QEvent
+from PySide6.QtGui import QPainter, QColor, QPixmap
 from app.ui.theme import BG, SCROLLBAR, SUBTXT
 from app.core.logger import APP_LOGGER
 from .containers import AspectRatioContainer
+
+SCROLLBAR_THICKNESS_PX = 6
+SCROLLBAR_MARGIN_PX = 2
+SCROLLBAR_HIDE_DELAY_MS = 700
+ZOOM_MIN = 0.2
+ZOOM_MAX = 8.0
+ZOOM_BASE = 1.0
+ZOOM_EPS = 1e-3
+ZOOM_DELTA_EPS = 1e-6
+PLACEHOLDER_FONT_PT = 14
+PLACEHOLDER_TEXT = "Video Preview"
+APP_ZOOM_MIN = 1.0
+APP_ZOOM_MAX = 1.35
+APP_ZOOM_EPS = 1e-3
+PINCH_NATIVE_SCALE = 0.5
+PINCH_NATIVE_MIN = 0.7
+PINCH_NATIVE_MAX = 1.3
+CONTENT_FALLBACK_SIZE = (1200, 720)
+PREVIEW_ASPECT_RATIO = (16, 9)
+PINNED_PREVIEW_SIZE = (420, 236)
 
 class ZoomView(QGraphicsView):
     firstFrame = Signal()
@@ -43,10 +63,10 @@ class ZoomView(QGraphicsView):
             "QGraphicsView::viewport { background: transparent; border: none; }\n"
         )
         self._scrollbar_qss = (
-            "QScrollBar:vertical { width: 6px; background: transparent; margin: 2px; }\n"
+            f"QScrollBar:vertical {{ width: {SCROLLBAR_THICKNESS_PX}px; background: transparent; margin: {SCROLLBAR_MARGIN_PX}px; }}\n"
             f"QScrollBar::handle:vertical {{ background: {SCROLLBAR}; border-radius: 0px; }}\n"
             "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; background: transparent; }\n"
-            "QScrollBar:horizontal { height: 6px; background: transparent; margin: 2px; }\n"
+            f"QScrollBar:horizontal {{ height: {SCROLLBAR_THICKNESS_PX}px; background: transparent; margin: {SCROLLBAR_MARGIN_PX}px; }}\n"
             f"QScrollBar::handle:horizontal {{ background: {SCROLLBAR}; border-radius: 0px; }}\n"
             "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; background: transparent; }\n"
         )
@@ -58,9 +78,9 @@ class ZoomView(QGraphicsView):
         self._scrollbar_style_applied = False
         # State
         self._has_image = False
-        self._zoom = 1.0
-        self._min_zoom = 0.2
-        self._max_zoom = 8.0
+        self._zoom = ZOOM_BASE
+        self._min_zoom = ZOOM_MIN
+        self._max_zoom = ZOOM_MAX
         self._emitted_first = False
         self._last_pix_size = QSize()
         self._pending_refit = False
@@ -75,10 +95,10 @@ class ZoomView(QGraphicsView):
 
     def _build_scrollbar_qss(self, color: str) -> str:
         return (
-            "QScrollBar:vertical { width: 6px; background: transparent; margin: 2px; }\n"
+            f"QScrollBar:vertical {{ width: {SCROLLBAR_THICKNESS_PX}px; background: transparent; margin: {SCROLLBAR_MARGIN_PX}px; }}\n"
             f"QScrollBar::handle:vertical {{ background: {color}; border-radius: 0px; }}\n"
             "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; background: transparent; }\n"
-            "QScrollBar:horizontal { height: 6px; background: transparent; margin: 2px; }\n"
+            f"QScrollBar:horizontal {{ height: {SCROLLBAR_THICKNESS_PX}px; background: transparent; margin: {SCROLLBAR_MARGIN_PX}px; }}\n"
             f"QScrollBar::handle:horizontal {{ background: {color}; border-radius: 0px; }}\n"
             "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; background: transparent; }\n"
         )
@@ -117,7 +137,7 @@ class ZoomView(QGraphicsView):
             needs_refit = True
         elif not self._has_image:
             needs_refit = True
-        elif size_changed and abs(self._zoom - 1.0) < 1e-3:
+        elif size_changed and abs(self._zoom - ZOOM_BASE) < ZOOM_EPS:
             needs_refit = True
         self._has_image = True
         if needs_refit:
@@ -154,11 +174,11 @@ class ZoomView(QGraphicsView):
                 self.resetTransform()
             except Exception as e:
                 APP_LOGGER.error(f"Error resetting transform in ZoomView.reset_first_frame: {e}")
-            self._zoom = 1.0
+            self._zoom = ZOOM_BASE
 
     def _zoom_by(self, factor: float):
         new_zoom = max(self._min_zoom, min(self._zoom * factor, self._max_zoom))
-        if abs(new_zoom - self._zoom) < 1e-6:
+        if abs(new_zoom - self._zoom) < ZOOM_DELTA_EPS:
             return
         real = new_zoom / self._zoom
         self.scale(real, real)
@@ -227,13 +247,13 @@ class ZoomView(QGraphicsView):
     def resizeEvent(self, e):
         super().resizeEvent(e)
         # Keep initial fit; if user has zoomed, don't override
-        if self._has_image and abs(self._zoom - 1.0) < 1e-3:
+        if self._has_image and abs(self._zoom - ZOOM_BASE) < ZOOM_EPS:
             self._refit_view()
 
     def _refit_view(self):
         try:
             self.fitInView(self._pix, Qt.KeepAspectRatio)
-            self._zoom = 1.0
+            self._zoom = ZOOM_BASE
         except Exception:
             pass
     def drawForeground(self, painter: QPainter, rect):
@@ -243,9 +263,9 @@ class ZoomView(QGraphicsView):
             painter.setRenderHint(QPainter.Antialiasing)
             painter.setPen(QColor(SUBTXT))
             font = painter.font()
-            font.setPointSize(14)
+            font.setPointSize(PLACEHOLDER_FONT_PT)
             painter.setFont(font)
-            text = "Video Preview"
+            text = PLACEHOLDER_TEXT
             br = painter.boundingRect(rect, Qt.AlignCenter, text)
             painter.drawText(br, Qt.AlignCenter, text)
             painter.restore()
@@ -255,7 +275,7 @@ class ZoomView(QGraphicsView):
                 self.horizontalScrollBar().setVisible(True)
             if self.verticalScrollBar():
                 self.verticalScrollBar().setVisible(True)
-            self._sb_timer.start(700)
+            self._sb_timer.start(SCROLLBAR_HIDE_DELAY_MS)
         except Exception:
             pass
 
@@ -303,8 +323,8 @@ class AppZoomView(QGraphicsView):
         self._apply_scrollbar_style()
         # State
         self._scale = 1.0
-        self._min_scale = 1.0
-        self._max_scale = 1.35
+        self._min_scale = APP_ZOOM_MIN
+        self._max_scale = APP_ZOOM_MAX
         self._sb_timer = QTimer(self)
         self._sb_timer.setSingleShot(True)
         self._sb_timer.timeout.connect(self._hide_scrollbars)
@@ -316,10 +336,10 @@ class AppZoomView(QGraphicsView):
 
     def _build_scrollbar_style(self, color: str) -> str:
         return (
-            "QScrollBar:vertical { width: 6px; background: transparent; margin: 2px; }\n"
+            f"QScrollBar:vertical {{ width: {SCROLLBAR_THICKNESS_PX}px; background: transparent; margin: {SCROLLBAR_MARGIN_PX}px; }}\n"
             f"QScrollBar::handle:vertical {{ background: {color}; border-radius: 0px; }}\n"
             "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; background: transparent; }\n"
-            "QScrollBar:horizontal { height: 6px; background: transparent; margin: 2px; }\n"
+            f"QScrollBar:horizontal {{ height: {SCROLLBAR_THICKNESS_PX}px; background: transparent; margin: {SCROLLBAR_MARGIN_PX}px; }}\n"
             f"QScrollBar::handle:horizontal {{ background: {color}; border-radius: 0px; }}\n"
             "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; background: transparent; }\n"
         )
@@ -351,7 +371,7 @@ class AppZoomView(QGraphicsView):
         if not hint.isValid() or hint.width() <= 0 or hint.height() <= 0:
             hint = w.minimumSizeHint()
         if not hint.isValid() or hint.width() <= 0 or hint.height() <= 0:
-            hint = QSize(1200, 720)
+            hint = QSize(*CONTENT_FALLBACK_SIZE)
         self._base_size = hint
         self._apply_geometry_to_proxy()
         self._update_interaction_state()
@@ -361,7 +381,7 @@ class AppZoomView(QGraphicsView):
         self._scale = s
         self.resetTransform()
         self.scale(s, s)
-        if s > 1.0 + 1e-3:
+        if s > APP_ZOOM_MIN + APP_ZOOM_EPS:
             self._show_scrollbars_temporarily()
         else:
             self._hide_scrollbars()
@@ -378,8 +398,8 @@ class AppZoomView(QGraphicsView):
                 val = getattr(ev, 'value', None)
                 if callable(val): val = val()
                 if gtype == Qt.NativeGestureType.Zoom and val is not None:
-                    factor = 1.0 + (float(val) * 0.5)
-                    factor = max(0.7, min(factor, 1.3))
+                    factor = APP_ZOOM_MIN + (float(val) * PINCH_NATIVE_SCALE)
+                    factor = max(PINCH_NATIVE_MIN, min(factor, PINCH_NATIVE_MAX))
                     self.zoom_by(factor)
                     ev.accept(); return True
             except Exception:
@@ -402,7 +422,7 @@ class AppZoomView(QGraphicsView):
         try:
             h = self.horizontalScrollBar(); v = self.verticalScrollBar()
             has_scroll_range = ((h and h.maximum() > 0) or (v and v.maximum() > 0))
-            if self._scale <= 1.0 + 1e-3 and not has_scroll_range:
+            if self._scale <= APP_ZOOM_MIN + APP_ZOOM_EPS and not has_scroll_range:
                 return super().wheelEvent(e)
             pd = e.pixelDelta(); ad = e.angleDelta()
             dx = pd.x() if not pd.isNull() else ad.x()
@@ -425,7 +445,7 @@ class AppZoomView(QGraphicsView):
             if self.verticalScrollBar():
                 self.verticalScrollBar().setVisible(True)
             if getattr(self, "_content_fits", True):
-                self._sb_timer.start(700)
+                self._sb_timer.start(SCROLLBAR_HIDE_DELAY_MS)
         except Exception:
             pass
 
@@ -475,7 +495,7 @@ class AppZoomView(QGraphicsView):
             fits_h = sr.height() <= vp.height() + 0.5
             content_fits = fits_w and fits_h
             self._content_fits = content_fits
-            if self._scale <= 1.0 + 1e-3 and content_fits:
+            if self._scale <= APP_ZOOM_MIN + APP_ZOOM_EPS and content_fits:
                 self.setDragMode(QGraphicsView.NoDrag)
                 if self.horizontalScrollBar():
                     self.horizontalScrollBar().setRange(0, 0)
@@ -506,9 +526,11 @@ class PinnedPreviewWindow(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         self.view = ZoomView(bg_color=BG)
-        self.container = AspectRatioContainer(self.view, 16, 9)
+        self.container = AspectRatioContainer(
+            self.view, PREVIEW_ASPECT_RATIO[0], PREVIEW_ASPECT_RATIO[1]
+        )
         layout.addWidget(self.container)
-        self.resize(420, 236)
+        self.resize(*PINNED_PREVIEW_SIZE)
 
     def set_theme(self, theme: dict[str, str]):
         try:

@@ -1,4 +1,3 @@
-import pytest
 from app.core.session import RunSession
 
 def test_run_session_reset():

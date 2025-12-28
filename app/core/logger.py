@@ -3,6 +3,11 @@ import csv, time, uuid, logging
 from pathlib import Path
 from typing import Optional, Union
 
+MS_PER_SEC = 1000.0
+FIRMWARE_MS_PRECISION = 3
+TRACKING_TS_PRECISION = 3
+CIRCULARITY_PRECISION = 3
+CENTROID_PRECISION = 1
 # --- App-wide logger ---
 # Use a named logger for general application events and errors.
 # Defaults to console, but can be configured to log to file.
@@ -19,6 +24,10 @@ def configure_file_logging(log_path: Path, level=logging.DEBUG):
     for handler in list(APP_LOGGER.handlers):
         if isinstance(handler, logging.FileHandler):
             APP_LOGGER.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:
+                pass
     
     file_handler = logging.FileHandler(log_path, encoding='utf-8')
     file_handler.setFormatter(_formatter)
@@ -95,9 +104,9 @@ class RunLogger:
             "run_id": self.run_id,
             "tap_id": self.tap_id,
             "tap_uuid": str(uuid.uuid4()),
-            "t_host_ms": int(round(host_time_s * 1000.0)),
+            "t_host_ms": int(round(host_time_s * MS_PER_SEC)),
             "t_host_iso": host_iso or "",
-            "t_fw_ms": f"{firmware_ms:.3f}" if firmware_ms is not None else "",
+            "t_fw_ms": f"{firmware_ms:.{FIRMWARE_MS_PRECISION}f}" if firmware_ms is not None else "",
             "mode": mode,
             "stepsize": stepsize if stepsize is not None else "",
             "mark": mark,
@@ -147,12 +156,12 @@ class TrackingLogger:
         for s in states:
             rows.append({
                 "frame_idx": frame_idx,
-                "timestamp": f"{timestamp:.3f}",
+                "timestamp": f"{timestamp:.{TRACKING_TS_PRECISION}f}",
                 "stentor_id": s.id,
                 "state": s.state,
-                "circularity": f"{s.circularity:.3f}",
-                "x": f"{s.centroid[0]:.1f}",
-                "y": f"{s.centroid[1]:.1f}",
+                "circularity": f"{s.circularity:.{CIRCULARITY_PRECISION}f}",
+                "x": f"{s.centroid[0]:.{CENTROID_PRECISION}f}",
+                "y": f"{s.centroid[1]:.{CENTROID_PRECISION}f}",
                 "area": int(s.area)
             })
         
@@ -169,4 +178,3 @@ class TrackingLogger:
                 self._f.close()
         except Exception as e:
             APP_LOGGER.error(f"Failed to close tracking.csv: {e}")
-

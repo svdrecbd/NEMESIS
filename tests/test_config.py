@@ -1,5 +1,3 @@
-import pytest
-from pathlib import Path
 from app.core.configio import save_config, load_config
 
 def test_config_save_load(tmp_path):

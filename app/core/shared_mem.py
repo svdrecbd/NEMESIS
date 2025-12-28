@@ -1,16 +1,16 @@
 # shared_mem.py — Safe wrapper for SharedMemory ring buffers
 import multiprocessing.shared_memory
 import numpy as np
-import time
+import atexit
 from dataclasses import dataclass
-from typing import Tuple, Optional
+from typing import Tuple
 from app.core.logger import APP_LOGGER
 
 @dataclass
 class SharedBufferLayout:
     """Metadata for the shared buffer."""
     name: str
-    shape: Tuple[int, int, int]
+    shape: Tuple[int, ...]
     dtype: str
     size_bytes: int
 
@@ -45,8 +45,12 @@ class SharedMemoryManager:
                     stm.unlink()
                 except FileNotFoundError:
                     pass
+                except Exception as e:
+                     APP_LOGGER.warning(f"Could not unlink stale SHM {name}: {e}")
                 
                 self.shm = multiprocessing.shared_memory.SharedMemory(name=self.name, create=True, size=self.size_bytes)
+                # Register atexit cleanup for creator
+                atexit.register(self.cleanup)
             else:
                 # Connect to existing
                 self.shm = multiprocessing.shared_memory.SharedMemory(name=self.name, create=False)
@@ -61,6 +65,13 @@ class SharedMemoryManager:
 
     def cleanup(self):
         """Release resources. Creator also unlinks (deletes) the memory."""
+        # Unregister atexit if called manually to avoid double-call
+        if self._is_creator:
+            try:
+                atexit.unregister(self.cleanup)
+            except Exception:
+                pass
+
         if self.array is not None:
             del self.array
             self.array = None

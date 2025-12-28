@@ -1,9 +1,7 @@
 # app/ui/theme.py
 import sys
-from PySide6.QtGui import QColor, QFontDatabase, QFont, QPalette, QIcon, QImage, QPixmap, QPainter
-from PySide6.QtCore import Qt, QRect, QSize
-from PySide6.QtWidgets import QApplication, QWidget, QStylePainter, QStyleOptionTab, QStyle
-from pathlib import Path
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import QWidget
 from app.core.logger import APP_LOGGER
 
 # Constants handled by main usually, but needed here for defaults
@@ -26,6 +24,20 @@ DISABLED_BORDER = "#c5cedf"
 BUTTON_BORDER = "#c0c8da"
 BUTTON_CHECKED_BG = "#d6def2"
 INPUT_BORDER = "#c0c8da"
+
+BASE_FONT_PT = 11
+STATUS_FONT_PT = 10
+BUTTON_PADDING_Y = 6
+BUTTON_PADDING_X = 10
+INPUT_PADDING_Y = 4
+INPUT_PADDING_X = 6
+TAB_PADDING_Y = 6
+TAB_PADDING_LEFT = 12
+TAB_PADDING_RIGHT = 24
+TAB_MIN_WIDTH = 120
+UI_SCALE_MIN = 0.7
+UI_SCALE_MAX = 2.0
+PLOT_BASE_FONT_PT = 10
 
 THEMES: dict[str, dict[str, str]] = {
     "dark": {
@@ -97,16 +109,18 @@ def build_stylesheet(font_family: str | None, scale: float = 1.0, theme: dict = 
     dis_text = theme["DISABLED_TEXT"]
     dis_border = theme["DISABLED_BORDER"]
 
-    s = max(0.7, min(scale, 2.0))
+    s = max(UI_SCALE_MIN, min(scale, UI_SCALE_MAX))
     family_rule = f"font-family: '{font_family}';" if font_family else ""
-    font_pt = int(round(11 * s))
-    status_pt = int(round(10 * s))
-    btn_py = int(round(6 * s)); btn_px = int(round(10 * s))
-    inp_py = int(round(4 * s)); inp_px = int(round(6 * s))
-    tab_py = int(round(6 * s))
-    tab_left_px = int(round(12 * s))
-    tab_right_px = int(round(24 * s))
-    tab_min_w = int(round(120 * s))
+    font_pt = int(round(BASE_FONT_PT * s))
+    status_pt = int(round(STATUS_FONT_PT * s))
+    btn_py = int(round(BUTTON_PADDING_Y * s))
+    btn_px = int(round(BUTTON_PADDING_X * s))
+    inp_py = int(round(INPUT_PADDING_Y * s))
+    inp_px = int(round(INPUT_PADDING_X * s))
+    tab_py = int(round(TAB_PADDING_Y * s))
+    tab_left_px = int(round(TAB_PADDING_LEFT * s))
+    tab_right_px = int(round(TAB_PADDING_RIGHT * s))
+    tab_min_w = int(round(TAB_MIN_WIDTH * s))
     
     return f"""
 * {{ background: {bg}; color: {text}; font-size: {font_pt}pt; {family_rule} }}
@@ -203,7 +217,7 @@ def set_macos_titlebar_appearance(widget: QWidget, color: QColor) -> bool:
     NSAppearance = _cls(b"NSAppearance")
     appearanceNamed = _sel(b"appearanceNamed:")
     ns_name = _msg(NSString, stringWithUTF8String, c_char_p(b"NSAppearanceNameVibrantDark"), restype=c_void_p, argtypes=[c_char_p])
-    if ns_name:
+    if not ns_name:
         return False
     appearance = _msg(NSAppearance, appearanceNamed, ns_name)
     if not appearance:
@@ -248,7 +262,7 @@ def apply_matplotlib_theme(font_family: str | None, theme: dict[str, str]):
         mpl_family = None
     # Prefer the actual family name discovered by Matplotlib for the Typestar file
     family = mpl_family or font_family or "DejaVu Sans"
-    base_size = 10
+    base_size = PLOT_BASE_FONT_PT
     tick_size = max(8, base_size - 1)
     
     # Defaults from theme or fallback constants

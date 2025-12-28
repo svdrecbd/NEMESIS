@@ -8,6 +8,13 @@ import threading
 import queue
 from app.core.logger import APP_LOGGER
 
+DEFAULT_CAMERA_FPS = 30
+DEFAULT_FRAME_SIZE = (1280, 720)
+DEFAULT_RECORDER_FPS = 30
+RECORDER_BUFFER_SECONDS = 2.0
+RECORDER_JOIN_TIMEOUT_S = 2.0
+RECORDER_QUEUE_POLL_TIMEOUT_S = 0.1
+
 class VideoCapture:
     def __init__(self, index=0):
         self.index = index
@@ -16,9 +23,9 @@ class VideoCapture:
     def open(self) -> bool:
         self.cap = cv2.VideoCapture(self.index)
         # Best-effort defaults (tweak if your camera requires other sizes)
-        self.cap.set(cv2.CAP_PROP_FPS, 30)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        self.cap.set(cv2.CAP_PROP_FPS, DEFAULT_CAMERA_FPS)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, DEFAULT_FRAME_SIZE[0])
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, DEFAULT_FRAME_SIZE[1])
         return self.cap.isOpened()
 
     def read(self):
@@ -49,14 +56,15 @@ class VideoRecorder:
     Threaded MP4/MJPG recorder. Writes frames in a background thread to
     ensure the main application/preview never stutters due to disk I/O.
     """
-    def __init__(self, path: str, fps: int = 30, frame_size=(1280, 720)):
+    def __init__(self, path: str, fps: int = DEFAULT_RECORDER_FPS, frame_size=DEFAULT_FRAME_SIZE):
         self._path = path
         self.fps = max(1, int(fps))
         self.frame_size = tuple(frame_size)
         self.writer = None
         
-        # Buffer up to ~2 seconds of video (at 30fps) to absorb disk latency
-        self._queue = queue.Queue(maxsize=60)
+        # Buffer up to ~RECORDER_BUFFER_SECONDS seconds of video to absorb disk latency
+        queue_max = max(1, int(round(self.fps * RECORDER_BUFFER_SECONDS)))
+        self._queue = queue.Queue(maxsize=queue_max)
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._worker, daemon=True)
         
@@ -90,7 +98,7 @@ class VideoRecorder:
         while True:
             try:
                 # Wait for a frame, but check stop_event periodically
-                frame = self._queue.get(timeout=0.1)
+                frame = self._queue.get(timeout=RECORDER_QUEUE_POLL_TIMEOUT_S)
             except queue.Empty:
                 if self._stop_event.is_set():
                     break
@@ -131,7 +139,7 @@ class VideoRecorder:
             pass # If full, worker will eventually see stop_event
             
         if self._thread.is_alive():
-            self._thread.join(timeout=2.0)
+            self._thread.join(timeout=RECORDER_JOIN_TIMEOUT_S)
             
         if self.writer:
             self.writer.release()

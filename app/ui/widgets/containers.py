@@ -1,13 +1,28 @@
 # app/ui/widgets/containers.py
 from PySide6.QtWidgets import QWidget, QSizePolicy, QTabBar, QStylePainter, QStyleOptionTab, QStyle
-from PySide6.QtCore import QSize, Qt, QRect, QPoint
+from PySide6.QtCore import QSize, Qt, QRect
 from PySide6.QtGui import QIcon, QPalette
 from app.ui.theme import BG, BORDER, active_theme
+
+DEFAULT_ASPECT_RATIO = (16, 9)
+CONTAINER_MIN_SIZE = (480, 270)
+SIZE_HINT_BASE_WIDTH = 720
+CONTAINER_BORDER_PX = 1
+TAB_MIN_WIDTH = 160
+TAB_TEXT_PADDING = 12
+TAB_ICON_SIZE = (16, 16)
+TAB_ICON_TEXT_GAP = 6
 
 class AspectRatioContainer(QWidget):
     """Container that keeps a child at a fixed aspect ratio and only uses the
     height it needs for the current width (no wasted vertical space)."""
-    def __init__(self, child: QWidget, ratio_w: int = 16, ratio_h: int = 9, parent=None):
+    def __init__(
+        self,
+        child: QWidget,
+        ratio_w: int = DEFAULT_ASPECT_RATIO[0],
+        ratio_h: int = DEFAULT_ASPECT_RATIO[1],
+        parent=None,
+    ):
         super().__init__(parent)
         self._child = child
         self._ratio_w = max(1, int(ratio_w))
@@ -19,11 +34,11 @@ class AspectRatioContainer(QWidget):
         self.setSizePolicy(sp)
         # Container draws its own border to avoid halos (match preview box styling)
         self.setAttribute(Qt.WA_StyledBackground, True)
-        self._border_px = 1
+        self._border_px = CONTAINER_BORDER_PX
         self._show_border = True
         self._apply_border_style()
         # Reasonable floor so it never collapses
-        self.setMinimumSize(480, 270)
+        self.setMinimumSize(*CONTAINER_MIN_SIZE)
 
     # --- Qt "height-for-width" plumbing ---
     def hasHeightForWidth(self):
@@ -34,7 +49,7 @@ class AspectRatioContainer(QWidget):
 
     def sizeHint(self) -> QSize:
         # Width-driven; height will be computed via heightForWidth
-        base_w = 720
+        base_w = SIZE_HINT_BASE_WIDTH
         return QSize(base_w, self.heightForWidth(base_w))
 
     def set_aspect(self, w: int, h: int):
@@ -94,7 +109,7 @@ class LeftAlignTabBar(QTabBar):
 
     def tabSizeHint(self, index: int) -> QSize:
         size = super().tabSizeHint(index)
-        size.setWidth(max(size.width(), 160))
+        size.setWidth(max(size.width(), TAB_MIN_WIDTH))
         return size
 
     def paintEvent(self, event):
@@ -105,18 +120,18 @@ class LeftAlignTabBar(QTabBar):
             opt.rect = self.tabRect(index)
             painter.drawControl(QStyle.CE_TabBarTabShape, opt)
 
-            text_rect = opt.rect.adjusted(12, 0, -12, 0)
+            text_rect = opt.rect.adjusted(TAB_TEXT_PADDING, 0, -TAB_TEXT_PADDING, 0)
             painter.save()
             role = QPalette.ButtonText if opt.state & QStyle.State_Selected else QPalette.WindowText
             painter.setPen(opt.palette.color(role))
             alignment = Qt.AlignVCenter | Qt.AlignLeft
             offset = 0
             if not opt.icon.isNull():
-                icon_size = opt.iconSize if not opt.iconSize.isEmpty() else QSize(16, 16)
+                icon_size = opt.iconSize if not opt.iconSize.isEmpty() else QSize(*TAB_ICON_SIZE)
                 icon_rect = QRect(text_rect.left(), text_rect.center().y() - icon_size.height() // 2, icon_size.width(), icon_size.height())
                 opt.icon.paint(painter, icon_rect, Qt.AlignLeft | Qt.AlignVCenter,
                                QIcon.Active if opt.state & QStyle.State_Selected else QIcon.Normal,
                                QIcon.On if opt.state & QStyle.State_Selected else QIcon.Off)
-                offset = icon_rect.width() + 6
+                offset = icon_rect.width() + TAB_ICON_TEXT_GAP
             painter.drawText(text_rect.adjusted(offset, 0, 0, 0), alignment, opt.text)
             painter.restore()

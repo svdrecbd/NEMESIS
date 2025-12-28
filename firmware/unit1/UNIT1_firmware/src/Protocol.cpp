@@ -1,6 +1,8 @@
 #include "Protocol.hpp"
 #include <Arduino.h>
 
+constexpr uint8_t DEFAULT_JOG_STEPS = 9;
+
 void Protocol::begin(unsigned long baud) {
     Serial.begin(baud);
 }
@@ -32,12 +34,12 @@ bool Protocol::poll(HostCommand &cmd) {
         case 'r':
             cmd.type = HostCommand::Type::ArmJog;
             cmd.direction_up = true;
-            cmd.jog_steps = 9;
+            cmd.jog_steps = DEFAULT_JOG_STEPS;
             return true;
         case 'l':
             cmd.type = HostCommand::Type::ArmJog;
             cmd.direction_up = false;
-            cmd.jog_steps = 9;
+            cmd.jog_steps = DEFAULT_JOG_STEPS;
             return true;
         case '1': case '2': case '3': case '4': case '5':
             cmd.type = HostCommand::Type::Stepsize;

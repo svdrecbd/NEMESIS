@@ -19,6 +19,9 @@ qaenv/
 .mplconfig/
 .pytest_cache/
 
+# Node
+node_modules/
+
 # OS cruft
 .DS_Store
 Thumbs.db
@@ -34,3 +37,13 @@ recordings/
 # PyInstaller
 build/
 dist/
+
+# Compiled artifacts
+*.o
+*.obj
+*.elf
+*.hex
+*.bin
+*.exe
+*.app/
+*.dSYM/
