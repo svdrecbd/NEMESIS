@@ -8,14 +8,24 @@ from typing import Optional
 from PySide6.QtWidgets import (
     QWidget, QLabel, QPushButton, QFileDialog, QHBoxLayout, QVBoxLayout, QGridLayout, 
     QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit, QMessageBox, QSizePolicy, 
-    QListView, QSplitter, QFrame, QSpacerItem, QCheckBox, QMenu,
-    QApplication, QScrollArea, QGraphicsOpacityEffect
+    QListView, QSplitter, QFrame, QSpacerItem, QCheckBox, QMenu, QDialog,
+    QApplication, QScrollArea, QGraphicsOpacityEffect, QPlainTextEdit
 )
 from PySide6.QtCore import (
     QTimer, Qt, Signal, Slot, QUrl, QPropertyAnimation, QEasingCurve,
     QAbstractAnimation
 )
-from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QDesktopServices, QCursor, QAction, QActionGroup
+from PySide6.QtGui import (
+    QImage,
+    QPixmap,
+    QPainter,
+    QColor,
+    QDesktopServices,
+    QCursor,
+    QAction,
+    QActionGroup,
+    QFontDatabase,
+)
 
 from serial.tools import list_ports
 
@@ -24,7 +34,7 @@ from app.core.logger import APP_LOGGER, RunLogger, TrackingLogger, configure_fil
 from app.core.session import RunSession
 from app.core.version import APP_VERSION
 from app.core.workers import FrameWorker, ProcessCVWorker, RenderWorker
-from app.core.paths import RUNS_DIR, LOGO_PATH
+from app.core.paths import RUNS_DIR, LOGO_PATH, BASE_DIR
 from app.core.resources import ResourceRegistry
 
 from app.ui.theme import (
@@ -1185,6 +1195,12 @@ class RunTab(QWidget):
 
         menu.addSeparator()
 
+        action_fw = QAction("Show Firmware Code...", menu)
+        action_fw.triggered.connect(self._show_firmware_dialog)
+        menu.addAction(action_fw)
+
+        menu.addSeparator()
+
         action_refresh_ports = QAction("Refresh Ports", menu)
         action_refresh_ports.triggered.connect(self._refresh_serial_ports)
         menu.addAction(action_refresh_ports)
@@ -1206,6 +1222,55 @@ class RunTab(QWidget):
         )
         menu.addAction(action_open_cn)
         return menu
+
+    def _show_firmware_dialog(self):
+        fw_path = BASE_DIR / "firmware/arduino/stentor_habituator_stepper_v9/NEMESIS_Firmware.ino"
+        content = ""
+        try:
+            with fw_path.open("r", encoding="utf-8") as fh:
+                content = fh.read()
+        except Exception as exc:
+            content = f"// Error reading firmware file:\n// {fw_path}\n// {exc}"
+            _log_gui_exception(exc, context="Load firmware file")
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Arduino Firmware Source")
+        dialog.resize(600, 500)
+
+        layout = QVBoxLayout(dialog)
+        info = QLabel("Copy this code and flash it to your Arduino via the Arduino IDE.")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        editor = QPlainTextEdit()
+        editor.setPlainText(content)
+        editor.setReadOnly(True)
+        try:
+            font = QFontDatabase.systemFont(QFontDatabase.FixedFont)
+            editor.setFont(font)
+        except Exception:
+            pass
+        layout.addWidget(editor)
+
+        btn_row = QHBoxLayout()
+        copy_btn = QPushButton("Copy All")
+
+        def _copy():
+            editor.selectAll()
+            editor.copy()
+            self._update_status("Firmware code copied to clipboard.")
+
+        copy_btn.clicked.connect(_copy)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+
+        btn_row.addStretch(1)
+        btn_row.addWidget(copy_btn)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+        dialog.exec()
 
     def _logo_pressed(self, event):
         menu = getattr(self, "logo_menu", None)
