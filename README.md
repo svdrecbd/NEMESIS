@@ -23,7 +23,7 @@ NEMESIS is a specialized desktop application designed for automating habituation
 
 1.  Clone the repository:
     ```bash
-    git clone https://github.com/cellgeometry/nemesis.git
+    git clone https://github.com/svdrecbd/NEMESIS.git
     cd nemesis
     ```
 
