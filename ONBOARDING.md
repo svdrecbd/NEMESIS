@@ -99,6 +99,13 @@ Follow the installation steps in the README. Ensure you have the project require
 *   **Type Hinting**: Use Python type hints for all function signatures.
 *   **Logging**: Use `APP_LOGGER` from `app.core.logger` instead of `print`.
 *   **Conventions**: Follow existing naming conventions (snake_case for functions/variables, PascalCase for classes).
+*   **No Magic Numbers**: Promote literals to named constants at module scope. Prefer reuse and keep units explicit.
+*   **Schema Awareness**: When changing run data formats, bump `schema_version` and update docs/tests.
+*   **Theme Safety**: Use theme tokens (`BG`, `PLOT_FACE`, `TEXT`, etc.) instead of hardcoded colors.
+*   **Error Handling**: Keep UI paths resilient (log, degrade gracefully, avoid crashing the run loop).
+*   **Performance First**: Optimize hot paths (CV, render, logging) before adding features.
+*   **Maintainability Second**: Favor clear structure, small functions, and predictable data flow.
+*   **Keep Bloat Down**: Avoid unnecessary dependencies, duplicate logic, or heavy UI effects.
 
 ### Testing
 The project includes a comprehensive test suite using `pytest`.
