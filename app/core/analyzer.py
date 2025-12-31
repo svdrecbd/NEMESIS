@@ -62,8 +62,10 @@ class RunAnalyzer:
                 for row in reader:
                     try:
                         ts = float(row['timestamp'])
-                        sid = row['stentor_id']
-                        state = row['state']
+                        sid = row.get('stentor_id', "")
+                        state = row.get('state', "")
+                        if not sid or state == "NONE":
+                            continue
                         track_data.append((ts, sid, state))
                     except ValueError:
                         continue

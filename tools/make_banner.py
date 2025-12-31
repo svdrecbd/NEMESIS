@@ -1,6 +1,5 @@
 from PIL import Image, ImageDraw, ImageFont
 from pathlib import Path
-import textwrap
 
 BANNER_SIZE = (1280, 480)
 BANNER_BG_COLOR = "#ffffff"
@@ -82,8 +81,6 @@ def make_banner():
     if current_line:
         lines.append(' '.join(current_line))
     
-    wrapped_subtitle = '\n'.join(lines)
-
     # 4. Measure Heights (Manual Calculation for Robustness)
     # Title
     t_bbox = draw.textbbox((0, 0), title_text, font=font_title, anchor='lt')

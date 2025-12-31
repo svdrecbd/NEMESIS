@@ -30,7 +30,7 @@ from PySide6.QtGui import (
 from serial.tools import list_ports
 
 from app.core import video, configio
-from app.core.logger import APP_LOGGER, RunLogger, TrackingLogger, configure_file_logging
+from app.core.logger import APP_LOGGER, RunLogger, TrackingLogger, FrameLogger, configure_file_logging
 from app.core.session import RunSession
 from app.core.version import APP_VERSION
 from app.core.workers import FrameWorker, ProcessCVWorker, RenderWorker
@@ -120,6 +120,7 @@ STEPSIZE_OPTIONS = [
     "5 (1/16 Step)",
 ]
 RUN_DIR_CREATE_RETRIES = 5
+RUN_SCHEMA_VERSION = 2
 GITHUB_README_URL = "https://github.com/svdrecbd/NEMESIS"
 CALIFORNIA_NUMERICS_URL = "https://www.californianumerics.com/nemesis/"
 MIN_TIMER_DELAY_MS = 1
@@ -1796,17 +1797,41 @@ class RunTab(QWidget):
         return run_dir, run_id
 
     def _write_run_metadata(self, run_dir: Path, run_id: str, mode: str, *, hardware_controlled: bool):
+        cv_cfg = {}
+        try:
+            cfg = configio.load_config() or {}
+            cv_cfg = dict(cfg.get("cv", {}))
+        except Exception:
+            cv_cfg = {}
+        camera_fps = None
+        camera_size = None
+        if self.cap is not None:
+            try:
+                camera_fps = self.cap.get_fps()
+            except Exception:
+                camera_fps = None
+            try:
+                camera_size = self.cap.get_size()
+            except Exception:
+                camera_size = None
         data = {
+            "schema_version": RUN_SCHEMA_VERSION,
             "run_id": run_id,
             "started_at": datetime.now(timezone.utc).isoformat(),
+            "run_start_host_ms": int(round(self.session.run_start * MS_PER_SEC)) if self.session.run_start else None,
             "app_version": APP_VERSION,
             "serial_port": self._active_serial_port or self.port_edit.currentText().strip(),
+            "camera_index": self.session.camera_index,
+            "camera_fps": camera_fps,
+            "camera_frame_size": camera_size,
+            "preview_fps": self.preview_fps,
             "mode": mode,
             "period_sec": float(self.period_sec.value()) if mode == "Periodic" else None,
             "lambda_rpm": float(self.lambda_rpm.value()) if mode == "Poisson" else None,
             "stepsize": self._selected_stepsize() or self.current_stepsize,
             "recording_path": self.recorder.path if self.recorder else "",
             "hardware_controlled": bool(hardware_controlled),
+            "cv_config": cv_cfg,
         }
         try:
             with (run_dir / "run.json").open("w", encoding="utf-8") as fh:
@@ -1930,6 +1955,7 @@ class RunTab(QWidget):
 
         self.session.logger = RunLogger(run_dir=run_dir, run_id=run_id)
         self.session.tracking_logger = TrackingLogger(run_dir=run_dir)
+        self.session.frame_logger = FrameLogger(run_dir=run_dir)
         try:
             configure_file_logging(run_dir / "app.log")
         except Exception:
@@ -1990,6 +2016,12 @@ class RunTab(QWidget):
             except Exception:
                 pass
             self.session.tracking_logger = None
+        if self.session.frame_logger:
+            try:
+                self.session.frame_logger.close()
+            except Exception:
+                pass
+            self.session.frame_logger = None
 
         if self._auto_rec_started:
             self._stop_recording()
@@ -2186,6 +2218,18 @@ class RunTab(QWidget):
         self.cam_btn.setText("Close")
         self._start_frame_stream()
         self._update_status(f"Camera {index} opened.")
+        if self.session.run_dir:
+            try:
+                self._update_run_metadata(
+                    Path(self.session.run_dir),
+                    {
+                        "camera_index": index,
+                        "camera_fps": cap.get_fps(),
+                        "camera_frame_size": cap.get_size(),
+                    },
+                )
+            except Exception:
+                pass
 
     def _load_calibration(self) -> dict[str, float]:
         for path in self._calibration_paths:
@@ -2217,6 +2261,11 @@ class RunTab(QWidget):
             mask = None
             
         self.render_worker.submit_frame(bgr, mask, frame_idx)
+        if self.session.frame_logger:
+            try:
+                self.session.frame_logger.log_frame(frame_idx, timestamp)
+            except Exception:
+                pass
 
         # Recording (Direct BGR Write - Fast)
         if self.recorder:

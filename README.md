@@ -86,6 +86,23 @@ Switch to a **Data Tab** (via the `+` button) to access the Dashboard.
 *   **Visualize**: View raster plots of stimulus events and heatmaps of organism contraction responses.
 *   **Export**: Generate CSV files or raw logs for external analysis.
 
+### ML Export (HMM/LSTM)
+Each run folder includes `run.json`, `taps.csv`, `tracking.csv`, and `frames.csv` (full frame timeline).
+To export a fixed-step sequence for model training:
+
+```bash
+python tools/export_sequences.py --run-dir runs/<run_id> --step-ms 33
+```
+
+This writes `runs/<run_id>/sequence.csv` with per-frame aggregate features and tap indicators.
+
+#### ML-Friendly Schema Notes
+The run metadata (`run.json`) includes a schema version, run start time (monotonic ms),
+camera details, and a snapshot of CV settings used during capture. `tracking.csv` logs
+explicit `state=NONE` rows when no detections occur, and `frames.csv` provides a complete
+frame timeline for alignment. Together, these make the dataset straightforward to align
+and resample for sequence models (HMM/LSTM).
+
 ## Known Issues (Preview)
 *   **Timing Drift**: Long-duration periodic runs (>24h) may experience slight clock drift between the host and firmware timing. The application saves calibration data to mitigate this in subsequent runs.
 *   **Zoom Bounds**: Pinch-to-zoom on some trackpads may feel sensitive; use `Cmd/Ctrl` + `+/-` for precise control.

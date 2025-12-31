@@ -22,6 +22,7 @@ class RunSession:
 
     logger: Optional[object] = None  # Set to RunLogger at runtime
     tracking_logger: Optional[object] = None # Set to TrackingLogger at runtime
+    frame_logger: Optional[object] = None # Set to FrameLogger at runtime
     run_dir: Optional[str] = None
     run_start: Optional[float] = None
     taps: int = 0
@@ -92,6 +93,7 @@ class RunSession:
         self.replicant_total = 0
         self.replicant_running = False
         self.replicant_progress = 0
+        self.frame_logger = None
 
     def reset_tap_history(self) -> None:
         self.recent_intervals.clear()

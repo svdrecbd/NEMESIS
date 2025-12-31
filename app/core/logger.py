@@ -8,6 +8,7 @@ FIRMWARE_MS_PRECISION = 3
 TRACKING_TS_PRECISION = 3
 CIRCULARITY_PRECISION = 3
 CENTROID_PRECISION = 1
+FRAME_TS_PRECISION = 3
 # --- App-wide logger ---
 # Use a named logger for general application events and errors.
 # Defaults to console, but can be configured to log to file.
@@ -129,6 +130,7 @@ class RunLogger:
             APP_LOGGER.error(f"Failed to close taps.csv: {e}")
 
 TRACKING_FIELDS = ["frame_idx", "timestamp", "stentor_id", "state", "circularity", "x", "y", "area"]
+FRAME_FIELDS = ["frame_idx", "timestamp"]
 
 class TrackingLogger:
     def __init__(self, run_dir: Union[Path,str]):
@@ -149,20 +151,32 @@ class TrackingLogger:
         Log a batch of stentor states for a single frame.
         states: List[StentorState] objects from cvbot
         """
-        if self._w is None or not states:
+        if self._w is None:
             return
             
         rows = []
-        for s in states:
+        if states:
+            for s in states:
+                rows.append({
+                    "frame_idx": frame_idx,
+                    "timestamp": f"{timestamp:.{TRACKING_TS_PRECISION}f}",
+                    "stentor_id": s.id,
+                    "state": s.state,
+                    "circularity": f"{s.circularity:.{CIRCULARITY_PRECISION}f}",
+                    "x": f"{s.centroid[0]:.{CENTROID_PRECISION}f}",
+                    "y": f"{s.centroid[1]:.{CENTROID_PRECISION}f}",
+                    "area": int(s.area)
+                })
+        else:
             rows.append({
                 "frame_idx": frame_idx,
                 "timestamp": f"{timestamp:.{TRACKING_TS_PRECISION}f}",
-                "stentor_id": s.id,
-                "state": s.state,
-                "circularity": f"{s.circularity:.{CIRCULARITY_PRECISION}f}",
-                "x": f"{s.centroid[0]:.{CENTROID_PRECISION}f}",
-                "y": f"{s.centroid[1]:.{CENTROID_PRECISION}f}",
-                "area": int(s.area)
+                "stentor_id": "",
+                "state": "NONE",
+                "circularity": "",
+                "x": "",
+                "y": "",
+                "area": "",
             })
         
         try:
@@ -178,3 +192,38 @@ class TrackingLogger:
                 self._f.close()
         except Exception as e:
             APP_LOGGER.error(f"Failed to close tracking.csv: {e}")
+
+
+class FrameLogger:
+    def __init__(self, run_dir: Union[Path,str]):
+        self.run_dir = Path(run_dir)
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self._f = None
+        self._w = None
+        try:
+            self._f = open(self.run_dir / "frames.csv", "a", newline="", encoding="utf-8")
+            self._w = csv.DictWriter(self._f, fieldnames=FRAME_FIELDS)
+            if self._f.tell() == 0:
+                self._w.writeheader()
+        except Exception as e:
+            APP_LOGGER.error(f"Failed to open frames.csv: {e}")
+
+    def log_frame(self, frame_idx: int, timestamp: float) -> None:
+        if self._w is None:
+            return
+        row = {
+            "frame_idx": frame_idx,
+            "timestamp": f"{timestamp:.{FRAME_TS_PRECISION}f}",
+        }
+        try:
+            self._w.writerow(row)
+        except Exception as e:
+            APP_LOGGER.error(f"Failed to write frames row: {e}")
+
+    def close(self):
+        try:
+            if self._f:
+                self._f.flush()
+                self._f.close()
+        except Exception as e:
+            APP_LOGGER.error(f"Failed to close frames.csv: {e}")
