@@ -33,6 +33,7 @@ recordings/
 *.avi
 *.csv
 *.json
+!docs/sample_sequence.csv
 
 # PyInstaller
 build/
