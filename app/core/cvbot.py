@@ -26,6 +26,9 @@ DEFAULT_CV_CONFIG = {
     "history_len": 10,
     "adaptive_block_size": 31,
     "adaptive_c": -5,
+    "edge_margin_frac": 0.05,
+    "edge_margin_min_px": 12,
+    "edge_ignore": False,
 }
 MIN_ADAPTIVE_BLOCK = 3
 MASK_KERNEL_SIZE = (3, 3)
@@ -38,6 +41,7 @@ MASK_MAX_VALUE = 255
 COLOR_GREEN = (0, 255, 0)
 COLOR_RED = (0, 0, 255)
 COLOR_YELLOW = (0, 255, 255)
+COLOR_ORANGE = (255, 165, 0)
 RGB_COLOR_MAX_EXCLUSIVE = 255
 
 @dataclass
@@ -49,6 +53,7 @@ class StentorState:
     state: str  # "EXTENDED", "CONTRACTED", "UNDETERMINED"
     timestamp: float
     debug_color: Tuple[int, int, int]
+    edge_reflection: bool = False
 
 class StentorTracker:
     def __init__(self):
@@ -98,6 +103,12 @@ class StentorTracker:
         if self.adaptive_block_size % 2 == 0:
             self.adaptive_block_size += 1
         self.adaptive_c = int(cv_cfg.get("adaptive_c", DEFAULT_CV_CONFIG["adaptive_c"]))
+
+        # Edge reflection handling
+        edge_frac = float(cv_cfg.get("edge_margin_frac", DEFAULT_CV_CONFIG["edge_margin_frac"]))
+        self.edge_margin_frac = max(0.0, min(edge_frac, 0.5))
+        self.edge_margin_min_px = max(0, int(cv_cfg.get("edge_margin_min_px", DEFAULT_CV_CONFIG["edge_margin_min_px"])))
+        self.edge_ignore = bool(cv_cfg.get("edge_ignore", DEFAULT_CV_CONFIG["edge_ignore"]))
         
         # State
         self.tracks: Dict[int, dict] = {} 
@@ -127,6 +138,8 @@ class StentorTracker:
         # Inverting Red channel makes Stentor bright and BG dark.
         if frame is None:
             return [], np.zeros(DEFAULT_EMPTY_MASK_SHAPE, dtype=np.uint8)
+        frame_h, frame_w = frame.shape[:2]
+        edge_margin = self._edge_margin(frame_w, frame_h)
 
         # 1. Segmentation (Green Stentor on White Background)
         # Strategy: Use Red channel. 
@@ -177,11 +190,24 @@ class StentorTracker:
                 cy = float(M["m01"] / M["m00"])
             else:
                 cx, cy = 0.0, 0.0
+
+            x, y, w, h = cv2.boundingRect(cnt)
+            edge_reflection = False
+            if edge_margin > 0:
+                edge_reflection = (
+                    x <= edge_margin
+                    or y <= edge_margin
+                    or (x + w) >= (frame_w - edge_margin)
+                    or (y + h) >= (frame_h - edge_margin)
+                )
+            if edge_reflection and self.edge_ignore:
+                continue
                 
             current_blobs.append({
                 'centroid': (cx, cy),
                 'area': area,
                 'circularity': circularity,
+                'edge_reflection': edge_reflection,
                 'cnt': cnt
             })
 
@@ -242,6 +268,9 @@ class StentorTracker:
             
             # Classification Logic
             state, debug_color = self._classify_state(track)
+            edge_reflection = bool(track.get("edge_reflection", False))
+            if edge_reflection:
+                debug_color = COLOR_ORANGE
             
             res = StentorState(
                 id=t_id,
@@ -250,7 +279,8 @@ class StentorTracker:
                 circularity=track['current_circularity'],
                 state=state,
                 timestamp=timestamp,
-                debug_color=debug_color
+                debug_color=debug_color,
+                edge_reflection=edge_reflection
             )
             results.append(res)
             
@@ -272,7 +302,8 @@ class StentorTracker:
             'history': deque([(timestamp, blob['circularity'])], maxlen=self.history_len),
             'last_seen': timestamp,
             'color': color,
-            'frame_cnt': 1
+            'frame_cnt': 1,
+            'edge_reflection': bool(blob.get("edge_reflection", False)),
         }
         return tid
 
@@ -287,6 +318,7 @@ class StentorTracker:
         track['last_seen'] = timestamp
         track['history'].append((timestamp, blob['circularity']))
         track['frame_cnt'] += 1
+        track['edge_reflection'] = bool(blob.get("edge_reflection", False))
         
         # Update Home Base (Running Average)
         # Stentor "anchor" doesn't move, but the centroid does (it swings).
@@ -333,6 +365,16 @@ class StentorTracker:
             return "CONTRACTED", COLOR_RED # Red for Contraction event
         else:
             return "UNDETERMINED", COLOR_YELLOW # Yellow for Ambiguous/End-on
+
+    def _edge_margin(self, width: int, height: int) -> int:
+        min_dim = min(width, height)
+        if min_dim <= 0:
+            return 0
+        margin = max(self.edge_margin_min_px, int(min_dim * self.edge_margin_frac))
+        max_margin = max(0, (min_dim // 2) - 1)
+        if max_margin:
+            margin = min(margin, max_margin)
+        return max(0, margin)
 
 
 def run_cv_process(shm_name: str, shm_shape: Tuple[int, ...],

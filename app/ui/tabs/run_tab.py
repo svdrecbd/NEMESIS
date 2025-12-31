@@ -120,7 +120,7 @@ STEPSIZE_OPTIONS = [
     "5 (1/16 Step)",
 ]
 RUN_DIR_CREATE_RETRIES = 5
-RUN_SCHEMA_VERSION = 2
+RUN_SCHEMA_VERSION = 3
 GITHUB_README_URL = "https://github.com/svdrecbd/NEMESIS"
 CALIFORNIA_NUMERICS_URL = "https://www.californianumerics.com/nemesis/"
 MIN_TIMER_DELAY_MS = 1

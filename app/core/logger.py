@@ -129,7 +129,7 @@ class RunLogger:
         except Exception as e:
             APP_LOGGER.error(f"Failed to close taps.csv: {e}")
 
-TRACKING_FIELDS = ["frame_idx", "timestamp", "stentor_id", "state", "circularity", "x", "y", "area"]
+TRACKING_FIELDS = ["frame_idx", "timestamp", "stentor_id", "state", "circularity", "x", "y", "area", "edge_reflection"]
 FRAME_FIELDS = ["frame_idx", "timestamp"]
 
 class TrackingLogger:
@@ -165,7 +165,8 @@ class TrackingLogger:
                     "circularity": f"{s.circularity:.{CIRCULARITY_PRECISION}f}",
                     "x": f"{s.centroid[0]:.{CENTROID_PRECISION}f}",
                     "y": f"{s.centroid[1]:.{CENTROID_PRECISION}f}",
-                    "area": int(s.area)
+                    "area": int(s.area),
+                    "edge_reflection": "1" if getattr(s, "edge_reflection", False) else "0",
                 })
         else:
             rows.append({
@@ -177,6 +178,7 @@ class TrackingLogger:
                 "x": "",
                 "y": "",
                 "area": "",
+                "edge_reflection": "0",
             })
         
         try:
