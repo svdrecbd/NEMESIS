@@ -103,6 +103,8 @@ explicit `state=NONE` rows when no detections occur, and `frames.csv` provides a
 frame timeline for alignment. Together, these make the dataset straightforward to align
 and resample for sequence models (HMM/LSTM).
 
+Sample output: `docs/sample_sequence.csv`.
+
 ## Known Issues (Preview)
 *   **Timing Drift**: Long-duration periodic runs (>24h) may experience slight clock drift between the host and firmware timing. The application saves calibration data to mitigate this in subsequent runs.
 *   **Zoom Bounds**: Pinch-to-zoom on some trackpads may feel sensitive; use `Cmd/Ctrl` + `+/-` for precise control.
