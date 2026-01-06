@@ -107,6 +107,7 @@ AUTO_STOP_MAX_MIN = 20000.0
 AUTO_STOP_MIN_MIN = 0.0
 AUTO_STOP_DECIMALS = 1
 AUTO_STOP_CONTROL_WIDTH = 200
+AUTO_STOP_GRACE_TAPS = 2
 LOGO_ALPHA_THRESHOLD = 24
 SERIAL_BAUD_DEFAULT = 9600
 SERIAL_TIMEOUT_S = 0.0
@@ -1143,9 +1144,11 @@ class RunTab(QWidget):
         self._preview_frame_counter = 0
         self._recorded_frame_counter = 0
         self._zero_warmup_warning_shown = False
+        self._auto_stop_pending_taps: int | None = None
+        self._next_tap_delay_s: float | None = None
         self._auto_stop_timer = QTimer(self)
         self._auto_stop_timer.setSingleShot(True)
-        self._auto_stop_timer.timeout.connect(self._stop_run)
+        self._auto_stop_timer.timeout.connect(self._on_auto_stop_due)
         # Dense status line updater
         self.status_timer = QTimer(self)
         self.status_timer.timeout.connect(self._refresh_statusline)
@@ -1957,10 +1960,45 @@ class RunTab(QWidget):
         if self.session.replicant_running:
             self.session.replicant_progress = min(self.session.replicant_progress + 1, self.session.replicant_total)
             self.live_chart.mark_replay_progress(self.session.replicant_progress)
+        self._update_next_tap_status()
+        pending = self._auto_stop_pending_taps
+        if pending is not None:
+            pending -= 1
+            if pending <= 0:
+                self._auto_stop_pending_taps = None
+                self._stop_run()
+            else:
+                self._auto_stop_pending_taps = pending
 
-    def _schedule_next_tap(self, delay_s: float):
+    def _schedule_next_tap(self, delay_s: float, *, track_next: bool = True):
         delay_ms = max(MIN_TIMER_DELAY_MS, int(delay_s * MS_PER_SEC))
         self.run_timer.start(delay_ms)
+        if track_next:
+            self._next_tap_delay_s = float(delay_s)
+
+    def _on_auto_stop_due(self):
+        if not self._hardware_run_active:
+            return
+        self._auto_stop_pending_taps = AUTO_STOP_GRACE_TAPS
+        self._update_status(
+            f"Auto-stop reached. Allowing {AUTO_STOP_GRACE_TAPS} more tap(s)."
+        )
+
+    def _should_schedule_next_tap(self) -> bool:
+        pending = self._auto_stop_pending_taps
+        if pending is None:
+            return True
+        return pending > 1
+
+    def _update_next_tap_status(self):
+        if not self._run_controlled_by_host or not self._hardware_run_active:
+            return
+        if self._next_tap_delay_s is None:
+            return
+        try:
+            self.serial_status.setText(f"Next tap in {self._next_tap_delay_s:.1f}s")
+        except Exception:
+            pass
 
     def _relocate_active_recording(self, run_dir: Path) -> bool:
         if not self.recorder:
@@ -1999,6 +2037,8 @@ class RunTab(QWidget):
         self._pending_taps.clear()
         self._run_controlled_by_host = not hardware_controlled
         self._contraction_count = 0
+        self._auto_stop_pending_taps = None
+        self._next_tap_delay_s = None
         self.live_chart.reset()
         current_results = getattr(self.session, "cv_results", None) or []
         self._last_cv_states = {result.id: result.state for result in current_results}
@@ -2071,7 +2111,7 @@ class RunTab(QWidget):
                 first_delay_s = warmup_s + self.session.replicant_delays[0]
             else:
                 first_delay_s = warmup_s
-            self._schedule_next_tap(first_delay_s)
+            self._schedule_next_tap(first_delay_s, track_next=False)
 
         auto_stop_min = float(self.auto_stop_min.value())
         if auto_stop_min > 0.0:
@@ -2102,6 +2142,8 @@ class RunTab(QWidget):
         recording_path = self.recorder.path if self.recorder else ""
         self.run_timer.stop()
         self._auto_stop_timer.stop()
+        self._auto_stop_pending_taps = None
+        self._next_tap_delay_s = None
         self._hardware_run_active = False
         self.session.hardware_run_active = False
         if self.session.logger:
@@ -2164,7 +2206,10 @@ class RunTab(QWidget):
                 self._log_pending_tap(None)
             self.session.replicant_index += 1
             if self.session.replicant_index < len(self.session.replicant_delays):
-                self._schedule_next_tap(self.session.replicant_delays[self.session.replicant_index])
+                if self._should_schedule_next_tap():
+                    self._schedule_next_tap(self.session.replicant_delays[self.session.replicant_index])
+                else:
+                    self._next_tap_delay_s = None
             else:
                 self._stop_run()
             return
@@ -2174,7 +2219,10 @@ class RunTab(QWidget):
         sent = self._send_serial_char("t", "Scheduled tap")
         if not sent:
             self._log_pending_tap(None)
-        self._schedule_next_tap(self.session.scheduler.next_delay_s())
+        if self._should_schedule_next_tap():
+            self._schedule_next_tap(self.session.scheduler.next_delay_s())
+        else:
+            self._next_tap_delay_s = None
 
     def _start_recording(self):
         if self.cap is None:
