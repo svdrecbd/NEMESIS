@@ -22,7 +22,10 @@ STANDARD_X_LIMIT_MAX_MIN = 180.0
 STANDARD_X_LIMIT_MARGIN = 1.05
 STANDARD_MAJOR_TICK_MIN = 10
 STANDARD_MINOR_TICK_MIN = 1
-STANDARD_Y_LIMITS = (-5, 105)
+CONTRACTION_Y_LIMITS = (0.0, 1.0)
+CONTRACTION_LINE_OFFSET = 0.5
+CONTRACTION_LINE_LENGTH = 0.6
+CONTRACTION_LINEWIDTH = 1.2
 HIGHLIGHT_EVERY = 10
 LONG_RASTER_X_TICK_STEP = 5
 LONG_RASTER_X_LIMIT = (-0.5, 59.5)
@@ -71,6 +74,7 @@ class LiveChart:
         except Exception as e:
             APP_LOGGER.error(f"Error setting canvas stylesheet: {e}")
         self.times_sec: list[float] = []
+        self.contraction_times_sec: list[float] = []
         self._time_unit: str = "minutes"
         self._last_max_elapsed_sec: float = 0.0
         self.replay_targets: list[float] = []
@@ -99,6 +103,7 @@ class LiveChart:
 
     def reset(self):
         self.times_sec.clear()
+        self.contraction_times_sec.clear()
         self.replay_completed = min(self.replay_completed, len(self.replay_targets))
         self._last_max_elapsed_sec = 0.0
         self._long_run_view = "taps"
@@ -111,6 +116,10 @@ class LiveChart:
 
     def add_tap(self, t_since_start_s: float):
         self.times_sec.append(float(t_since_start_s))
+        self._redraw()
+
+    def add_contraction(self, t_since_start_s: float):
+        self.contraction_times_sec.append(float(t_since_start_s))
         self._redraw()
 
     def set_times(self, times_seconds: Sequence[float]):
@@ -191,8 +200,9 @@ class LiveChart:
 
     def _redraw(self):
         max_elapsed_sec_actual = max(self.times_sec) if self.times_sec else 0.0
+        max_elapsed_sec_contractions = max(self.contraction_times_sec) if self.contraction_times_sec else 0.0
         max_elapsed_sec_script = max(self.replay_targets) if self.replay_targets else 0.0
-        max_elapsed_sec = max(max_elapsed_sec_actual, max_elapsed_sec_script)
+        max_elapsed_sec = max(max_elapsed_sec_actual, max_elapsed_sec_script, max_elapsed_sec_contractions)
         if max_elapsed_sec <= 0:
             self._configure_standard_axes(0.0)
             self._set_long_mode(False)
@@ -200,7 +210,7 @@ class LiveChart:
             self.canvas.draw_idle()
             return
 
-        long_mode = max_elapsed_sec >= LONG_RUN_THRESHOLD_S
+        long_mode = max(max_elapsed_sec_actual, max_elapsed_sec_script) >= LONG_RUN_THRESHOLD_S
         heatmap_on = False
         if long_mode:
             if self._long_run_view == "contraction":
@@ -242,9 +252,9 @@ class LiveChart:
             spine.set_color(text_color)
         ax_top.set_title("")
 
-        ax_bot.set_ylabel("% Contracted")
-        ax_bot.set_ylim(*STANDARD_Y_LIMITS)
-        ax_bot.yaxis.set_major_formatter(plt.FuncFormatter("{:.0f}%".format))
+        ax_bot.set_ylabel("Contractions", color=text_color)
+        ax_bot.set_ylim(*CONTRACTION_Y_LIMITS)
+        ax_bot.set_yticks([])
         ax_bot.tick_params(axis='x', colors=text_color)
         ax_bot.tick_params(axis='y', colors=text_color)
         for spine in ax_bot.spines.values():
@@ -344,11 +354,13 @@ class LiveChart:
         text_color = self.color("TEXT")
         accent_color = self.color("ACCENT")
         remaining_color = self.color("SUBTXT")
+        contraction_color = self.color("DANGER")
 
         factor = SECONDS_PER_MIN
         ts_unit = [t / factor for t in self.times_sec]
         highlighted = [t for i, t in enumerate(ts_unit) if (i + 1) % HIGHLIGHT_EVERY == 0]
         regular = [t for i, t in enumerate(ts_unit) if (i + 1) % HIGHLIGHT_EVERY != 0]
+        contraction_unit = [t / factor for t in self.contraction_times_sec]
 
         if self.replay_targets:
             replay_unit = [t / factor for t in self.replay_targets]
@@ -373,6 +385,15 @@ class LiveChart:
             self.ax_top.eventplot(regular, orientation="horizontal", colors=text_color, linewidth=0.9)
         if highlighted:
             self.ax_top.eventplot(highlighted, orientation="horizontal", colors=accent_color, linewidth=1.6)
+        if contraction_unit:
+            self.ax_bot.eventplot(
+                contraction_unit,
+                orientation="horizontal",
+                colors=contraction_color,
+                linewidth=CONTRACTION_LINEWIDTH,
+                lineoffsets=CONTRACTION_LINE_OFFSET,
+                linelengths=CONTRACTION_LINE_LENGTH,
+            )
 
     def _draw_long_raster(self, max_elapsed_sec: float) -> None:
         ax = self.ax_top
@@ -606,7 +627,7 @@ class LiveChart:
         self.theme = theme
         from app.ui.theme import apply_matplotlib_theme
         apply_matplotlib_theme(self.font_family, theme)
-        if self.times_sec or self.replay_targets:
+        if self.times_sec or self.replay_targets or self.contraction_times_sec:
             self._redraw()
         else:
             if self._long_run_active:

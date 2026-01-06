@@ -90,6 +90,10 @@ LOGO_BLOCK_SPACING_PX = SPACING_XXS
 PERIOD_MIN_S = 0.1
 PERIOD_MAX_S = 3600.0
 PERIOD_DEFAULT_S = 10.0
+WARMUP_MIN_S = 0.0
+WARMUP_MAX_S = 600.0
+WARMUP_DEFAULT_S = 10.0
+WARMUP_DECIMALS = 1
 LAMBDA_MIN_RPM = 0.1
 LAMBDA_MAX_RPM = 600.0
 LAMBDA_DEFAULT_RPM = 6.0
@@ -714,7 +718,9 @@ class RunTab(QWidget):
         except Exception:
             pass
         self.status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        self.counters = QLabel("Taps: 0 | Elapsed: 0 s | Rate10: -- /min | Overall: 0.0 /min")
+        self.counters = QLabel(
+            "Taps: 0 | Contractions: 0 | Elapsed: 0 s | Rate10: -- /min | Overall: 0.0 /min"
+        )
         self.counters.setWordWrap(True)
         serial_status_row = QHBoxLayout()
         serial_status_row.setContentsMargins(0, 0, 0, 0)
@@ -888,6 +894,7 @@ class RunTab(QWidget):
         self.lbl_lambda = QLabel("λ (taps/min):")
         self.lbl_stepsize = QLabel("Stepsize:")
         self.lbl_replicant = QLabel("Replicant:")
+        self.lbl_warmup = QLabel("Warmup:")
         self.lbl_autostop = QLabel("Stop after (min):")
         lfm = self.lbl_mode.fontMetrics()
         label_w = max(
@@ -896,9 +903,10 @@ class RunTab(QWidget):
             lfm.horizontalAdvance("λ (taps/min):"),
             lfm.horizontalAdvance("Stepsize:"),
             lfm.horizontalAdvance("Replicant:"),
+            lfm.horizontalAdvance("Warmup:"),
             lfm.horizontalAdvance("Stop after (min):")
         ) + LABEL_WIDTH_PADDING_PX
-        for lbl in (self.lbl_mode, self.lbl_period, self.lbl_lambda, self.lbl_stepsize, self.lbl_replicant, self.lbl_autostop):
+        for lbl in (self.lbl_mode, self.lbl_period, self.lbl_lambda, self.lbl_stepsize, self.lbl_replicant, self.lbl_warmup, self.lbl_autostop):
             lbl.setFixedWidth(label_w)
         controls_grid = QGridLayout()
         controls_grid.setContentsMargins(0, 0, 0, 0)
@@ -911,7 +919,19 @@ class RunTab(QWidget):
         replicant_controls.addStretch(1)
         replicant_controls.addWidget(self.replicant_load_btn, 0, Qt.AlignRight)
         replicant_controls.addWidget(self.replicant_clear_btn, 0, Qt.AlignRight)
-        
+
+        # Warmup control
+        self.warmup_sec = QDoubleSpinBox()
+        self.warmup_sec.setRange(WARMUP_MIN_S, WARMUP_MAX_S)
+        self.warmup_sec.setValue(WARMUP_DEFAULT_S)
+        self.warmup_sec.setDecimals(WARMUP_DECIMALS)
+        self.warmup_sec.setSuffix(" s")
+        self.warmup_sec.setSpecialValueText("Off")
+        self.warmup_sec.setFixedWidth(CONTROL_WIDTH)
+        self.warmup_sec.setToolTip(
+            "Delay before the first host-run tap (0=Off). Use to let stentor settle."
+        )
+
         # Auto-stop control
         self.auto_stop_min = QDoubleSpinBox()
         self.auto_stop_min.setRange(AUTO_STOP_MIN_MIN, AUTO_STOP_MAX_MIN)
@@ -932,8 +952,10 @@ class RunTab(QWidget):
         controls_grid.addWidget(self.lambda_rpm, 3, 1, Qt.AlignRight)
         controls_grid.addWidget(self.lbl_stepsize, 4, 0, Qt.AlignLeft)
         controls_grid.addWidget(self.stepsize, 4, 1, Qt.AlignRight)
-        controls_grid.addWidget(self.lbl_autostop, 5, 0, Qt.AlignLeft)
-        controls_grid.addWidget(self.auto_stop_min, 5, 1, Qt.AlignRight)
+        controls_grid.addWidget(self.lbl_warmup, 5, 0, Qt.AlignLeft)
+        controls_grid.addWidget(self.warmup_sec, 5, 1, Qt.AlignRight)
+        controls_grid.addWidget(self.lbl_autostop, 6, 0, Qt.AlignLeft)
+        controls_grid.addWidget(self.auto_stop_min, 6, 1, Qt.AlignRight)
         controls_grid.setColumnStretch(1, 1)
         mode_section = QVBoxLayout()
         mode_section.setContentsMargins(0, 0, 0, 0)
@@ -1110,6 +1132,8 @@ class RunTab(QWidget):
         self.session.reset_runtime_state()
         self.serial = self.session.serial
         self._pending_taps = deque()
+        self._contraction_count = 0
+        self._last_cv_states: dict[int, str] = {}
         self._hardware_run_active = False
         self._hardware_configured = False
         self._awaiting_switch_start = False
@@ -1118,6 +1142,7 @@ class RunTab(QWidget):
         self._auto_rec_started = False
         self._preview_frame_counter = 0
         self._recorded_frame_counter = 0
+        self._zero_warmup_warning_shown = False
         self._auto_stop_timer = QTimer(self)
         self._auto_stop_timer.setSingleShot(True)
         self._auto_stop_timer.timeout.connect(self._stop_run)
@@ -1149,6 +1174,7 @@ class RunTab(QWidget):
         self.pro_btn.clicked.connect(self._toggle_pro_mode)
         self.period_sec.valueChanged.connect(lambda _v: self._update_status("Period updated."))
         self.lambda_rpm.valueChanged.connect(lambda _v: self._update_status("Lambda updated."))
+        self.warmup_sec.valueChanged.connect(self._on_warmup_changed)
         self.stepsize.currentTextChanged.connect(self._on_stepsize_changed)
         self.port_edit.editTextChanged.connect(self._on_port_text_changed)
 
@@ -1681,7 +1707,8 @@ class RunTab(QWidget):
             overall = (self.session.taps / elapsed) * SECONDS_PER_MIN
         try:
             self.counters.setText(
-                f"Taps: {self.session.taps} | Elapsed: {elapsed:.1f} s | "
+                f"Taps: {self.session.taps} | Contractions: {self._contraction_count} | "
+                f"Elapsed: {elapsed:.1f} s | "
                 f"Rate10: {rate10_str} /min | Overall: {overall:.1f} /min"
             )
         except Exception:
@@ -1695,6 +1722,23 @@ class RunTab(QWidget):
         if self.serial and self.serial.is_open():
             self._send_serial_char(str(step), f"Stepsize {step}")
 
+    def _on_warmup_changed(self, value: float):
+        warmup = max(0.0, float(value))
+        if warmup <= 0.0:
+            if not self._zero_warmup_warning_shown:
+                QMessageBox.warning(
+                    self,
+                    "Warmup Disabled",
+                    "Warmup delay is set to 0. The default warmup gives stentor time to settle and helps prevent\n"
+                    "accidental double taps if the switch is flipped. With warmup disabled, the first tap fires\n"
+                    "immediately when you start a host run.",
+                )
+                self._zero_warmup_warning_shown = True
+            self._update_status("Warmup disabled.")
+        else:
+            self._zero_warmup_warning_shown = False
+            self._update_status(f"Warmup set to {warmup:.1f} s.")
+
     def _save_config_clicked(self):
         cfg = configio.load_config() or {}
         run_cfg = cfg.get("run", {})
@@ -1704,6 +1748,7 @@ class RunTab(QWidget):
                 "period_sec": float(self.period_sec.value()),
                 "lambda_rpm": float(self.lambda_rpm.value()),
                 "stepsize": self._selected_stepsize(),
+                "warmup_sec": float(self.warmup_sec.value()),
                 "output_dir": self.outdir_edit.text().strip(),
                 "camera_index": int(self.cam_index.value()),
                 "serial_port": self.port_edit.currentText().strip(),
@@ -1737,6 +1782,12 @@ class RunTab(QWidget):
                 if self.stepsize.itemText(i).strip().startswith(str(step)):
                     self.stepsize.setCurrentIndex(i)
                     break
+        if "warmup_sec" in run_cfg:
+            try:
+                self.warmup_sec.blockSignals(True)
+                self.warmup_sec.setValue(float(run_cfg["warmup_sec"]))
+            finally:
+                self.warmup_sec.blockSignals(False)
         if "output_dir" in run_cfg and run_cfg["output_dir"]:
             self.outdir_edit.setText(run_cfg["output_dir"])
         if "camera_index" in run_cfg:
@@ -1773,6 +1824,8 @@ class RunTab(QWidget):
         self.session.taps = 0
         self.session.reset_tap_history()
         self.session.last_run_elapsed = 0.0
+        self._contraction_count = 0
+        self._last_cv_states.clear()
         self.live_chart.reset()
         if self.session.replicant_ready:
             self.live_chart.set_replay_targets(self.session.replicant_offsets)
@@ -1829,6 +1882,7 @@ class RunTab(QWidget):
             "period_sec": float(self.period_sec.value()) if mode == "Periodic" else None,
             "lambda_rpm": float(self.lambda_rpm.value()) if mode == "Poisson" else None,
             "stepsize": self._selected_stepsize() or self.current_stepsize,
+            "warmup_sec": float(self.warmup_sec.value()),
             "recording_path": self.recorder.path if self.recorder else "",
             "hardware_controlled": bool(hardware_controlled),
             "cv_config": cv_cfg,
@@ -1908,6 +1962,28 @@ class RunTab(QWidget):
         delay_ms = max(MIN_TIMER_DELAY_MS, int(delay_s * MS_PER_SEC))
         self.run_timer.start(delay_ms)
 
+    def _relocate_active_recording(self, run_dir: Path) -> bool:
+        if not self.recorder:
+            return True
+        try:
+            current_path = Path(self.recorder.path)
+        except Exception:
+            return False
+        if not current_path.exists():
+            return True
+        try:
+            if current_path.parent.resolve() == run_dir.resolve():
+                return True
+        except Exception:
+            if current_path.parent == run_dir:
+                return True
+        target_path = run_dir / current_path.name
+        if target_path.exists():
+            return True
+        if not self.recorder.relocate(str(target_path)):
+            return False
+        return True
+
     def _start_run(self, *, hardware_controlled: bool = False):
         if self._hardware_run_active:
             return
@@ -1922,6 +1998,13 @@ class RunTab(QWidget):
         self._recorded_frame_counter = 0
         self._pending_taps.clear()
         self._run_controlled_by_host = not hardware_controlled
+        self._contraction_count = 0
+        self.live_chart.reset()
+        current_results = getattr(self.session, "cv_results", None) or []
+        self._last_cv_states = {result.id: result.state for result in current_results}
+        relocated_ok = self._relocate_active_recording(run_dir)
+        first_delay_s: float | None = None
+        warmup_s = max(0.0, float(self.warmup_sec.value()))
 
         mode_label = "Periodic"
         if self.session.replicant_ready:
@@ -1961,9 +2044,11 @@ class RunTab(QWidget):
         except Exception:
             pass
 
-        self.live_chart.reset()
         if self.session.replicant_ready:
-            self.live_chart.set_replay_targets(self.session.replicant_offsets)
+            replay_targets = self.session.replicant_offsets
+            if not hardware_controlled and replay_targets and warmup_s > 0.0:
+                replay_targets = [offset + warmup_s for offset in replay_targets]
+            self.live_chart.set_replay_targets(replay_targets)
             self.live_chart.mark_replay_progress(0)
         else:
             self.live_chart.clear_replay_targets()
@@ -1983,18 +2068,33 @@ class RunTab(QWidget):
 
         if not hardware_controlled:
             if self.session.replicant_running and self.session.replicant_delays:
-                self._schedule_next_tap(self.session.replicant_delays[0])
-            elif not self.session.replicant_running:
-                self._schedule_next_tap(self.session.scheduler.next_delay_s())
+                first_delay_s = warmup_s + self.session.replicant_delays[0]
+            else:
+                first_delay_s = warmup_s
+            self._schedule_next_tap(first_delay_s)
 
         auto_stop_min = float(self.auto_stop_min.value())
         if auto_stop_min > 0.0:
             self._auto_stop_timer.start(int(auto_stop_min * SECONDS_PER_MIN * MS_PER_SEC))
 
         if not self.serial or not self.serial.is_open():
-            self._update_status("Run started (serial disconnected).")
+            status_msg = "Run started (serial disconnected)."
         else:
-            self._update_status("Run started.")
+            status_msg = "Run started."
+        if not hardware_controlled and first_delay_s is not None:
+            if first_delay_s <= 0.0:
+                delay_label = "immediately"
+            else:
+                delay_label = f"in {first_delay_s:.1f}s"
+            delay_msg = f"Host run armed. First tap {delay_label} - do not flip switch."
+            status_msg = f"{status_msg} {delay_msg}"
+            try:
+                self.serial_status.setText(delay_msg)
+            except Exception:
+                pass
+        if not relocated_ok:
+            status_msg = f"{status_msg} Recording stayed in original folder."
+        self._update_status(status_msg)
 
     def _stop_run(self, *, from_hardware: bool = False):
         if not self._hardware_run_active:
@@ -2292,6 +2392,22 @@ class RunTab(QWidget):
         self.session.cv_mask = mask
         if self.session.tracking_logger:
             self.session.tracking_logger.log_frame(frame_idx, timestamp, results)
+        try:
+            current_ids = {res.id for res in results}
+        except Exception:
+            current_ids = set()
+        for stale_id in list(self._last_cv_states):
+            if stale_id not in current_ids:
+                self._last_cv_states.pop(stale_id, None)
+        run_start = self.session.run_start
+        for res in results or []:
+            prev_state = self._last_cv_states.get(res.id)
+            if run_start is not None and res.state == "CONTRACTED" and prev_state != "CONTRACTED":
+                t_since = float(timestamp) - run_start
+                if t_since >= 0:
+                    self._contraction_count += 1
+                    self.live_chart.add_contraction(t_since)
+            self._last_cv_states[res.id] = res.state
 
     # _draw_cv_overlay removed - logic moved to RenderWorker
 

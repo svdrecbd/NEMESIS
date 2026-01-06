@@ -6,6 +6,7 @@
 import cv2
 import threading
 import queue
+from pathlib import Path
 from app.core.logger import APP_LOGGER
 
 DEFAULT_CAMERA_FPS = 30
@@ -89,6 +90,33 @@ class VideoRecorder:
     def path(self) -> str:
         """Final output path (after any codec fallback)."""
         return self._path
+
+    def relocate(self, new_path: str) -> bool:
+        """Move the active recording file and update the tracked path."""
+        try:
+            src = Path(self._path)
+            dest = Path(new_path)
+            if not src.exists():
+                return False
+            try:
+                if src.resolve() == dest.resolve():
+                    return True
+            except Exception:
+                if src == dest:
+                    return True
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                if src.stat().st_dev != dest.parent.stat().st_dev:
+                    APP_LOGGER.error("Recording move blocked: source and target are on different devices.")
+                    return False
+            except Exception:
+                return False
+            src.replace(dest)
+            self._path = str(dest)
+            return True
+        except Exception as exc:
+            APP_LOGGER.error(f"Failed to relocate recording to {new_path}: {exc}")
+            return False
 
     def is_open(self) -> bool:
         return self.writer is not None and self.writer.isOpened()
