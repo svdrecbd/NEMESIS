@@ -1302,6 +1302,7 @@ class RunTab(QWidget):
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
 
+        self._apply_macos_sheet(dialog)
         dialog.exec()
 
     def _logo_pressed(self, event):
@@ -1818,13 +1819,17 @@ class RunTab(QWidget):
         warmup = max(0.0, float(value))
         if warmup <= 0.0:
             if not self._zero_warmup_warning_shown:
-                QMessageBox.warning(
-                    self,
-                    "Warmup Disabled",
+                warning = QMessageBox(self)
+                warning.setIcon(QMessageBox.Warning)
+                warning.setWindowTitle("Warmup Disabled")
+                warning.setText(
                     "Warmup delay is set to 0. The default warmup gives stentor time to settle and helps prevent\n"
                     "accidental double taps if the switch is flipped. With warmup disabled, the first tap fires\n"
-                    "immediately when you start a host run.",
+                    "immediately when you start a host run."
                 )
+                warning.setStandardButtons(QMessageBox.Ok)
+                self._apply_macos_sheet(warning)
+                warning.exec()
                 self._zero_warmup_warning_shown = True
             self._update_status("Warmup disabled.")
         else:
@@ -1899,6 +1904,15 @@ class RunTab(QWidget):
             except Exception:
                 pass
         self._update_status("Config loaded.")
+
+    def _apply_macos_sheet(self, widget: QWidget) -> None:
+        if sys.platform != "darwin":
+            return
+        try:
+            widget.setWindowModality(Qt.WindowModal)
+            widget.setWindowFlag(Qt.Sheet, True)
+        except Exception:
+            pass
 
     def _toggle_pro_mode(self, enabled: bool):
         self.pro_mode = bool(enabled)
