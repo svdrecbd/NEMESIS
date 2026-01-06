@@ -108,6 +108,7 @@ AUTO_STOP_MIN_MIN = 0.0
 AUTO_STOP_DECIMALS = 1
 AUTO_STOP_CONTROL_WIDTH = 200
 AUTO_STOP_GRACE_TAPS = 2
+RUN_LOCK_TOOLTIP = "End the run before you can change the controls further."
 LOGO_ALPHA_THRESHOLD = 24
 SERIAL_BAUD_DEFAULT = 9600
 SERIAL_TIMEOUT_S = 0.0
@@ -1113,6 +1114,7 @@ class RunTab(QWidget):
         self._refresh_recording_indicator()
         self._sync_logo_menu_checks()
         self._update_mirror_layout()
+        self._init_run_lock_controls()
 
         # State
         self.cap = None
@@ -1717,6 +1719,93 @@ class RunTab(QWidget):
         except Exception:
             pass
 
+    def _init_run_lock_controls(self):
+        self._run_lock_controls = [
+            self.port_edit,
+            self.serial_btn,
+            self.enable_btn,
+            self.disable_btn,
+            self.tap_btn,
+            self.jog_up_btn,
+            self.jog_down_btn,
+            self.cam_index,
+            self.cam_btn,
+            self.popout_btn,
+            self.show_cv_check,
+            self.rec_start_btn,
+            self.rec_stop_btn,
+            self.auto_rec_check,
+            self.mode,
+            self.period_sec,
+            self.lambda_rpm,
+            self.stepsize,
+            self.warmup_sec,
+            self.auto_stop_min,
+            self.replicant_load_btn,
+            self.replicant_clear_btn,
+            self.save_cfg_btn,
+            self.load_cfg_btn,
+            self.outdir_edit,
+            self.outdir_btn,
+            self.flash_config_btn,
+            self.pro_btn,
+            self.clear_data_btn,
+            self.run_start_btn,
+        ]
+        self._run_lock_tooltips = {}
+        for widget in self._run_lock_controls:
+            if widget is None:
+                continue
+            try:
+                widget.setAttribute(Qt.WA_AlwaysShowToolTips, True)
+            except Exception:
+                pass
+            try:
+                self._run_lock_tooltips[widget] = widget.toolTip()
+            except Exception:
+                self._run_lock_tooltips[widget] = ""
+
+    def _set_run_controls_locked(self, locked: bool):
+        if not hasattr(self, "_run_lock_controls"):
+            return
+        if locked:
+            self._run_lock_prev_enabled = {}
+            for widget in self._run_lock_controls:
+                if widget is None:
+                    continue
+                try:
+                    self._run_lock_prev_enabled[widget] = widget.isEnabled()
+                except Exception:
+                    self._run_lock_prev_enabled[widget] = True
+                try:
+                    widget.setEnabled(False)
+                except Exception:
+                    pass
+                try:
+                    widget.setToolTip(RUN_LOCK_TOOLTIP)
+                except Exception:
+                    pass
+        else:
+            prev = getattr(self, "_run_lock_prev_enabled", {})
+            for widget in self._run_lock_controls:
+                if widget is None:
+                    continue
+                if widget in prev:
+                    try:
+                        widget.setEnabled(prev[widget])
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        widget.setEnabled(True)
+                    except Exception:
+                        pass
+                try:
+                    widget.setToolTip(self._run_lock_tooltips.get(widget, ""))
+                except Exception:
+                    pass
+            self._run_lock_prev_enabled = {}
+
     def _on_stepsize_changed(self, text: str):
         step = self._selected_stepsize()
         if step is None:
@@ -2105,6 +2194,7 @@ class RunTab(QWidget):
         self._write_run_metadata(run_dir, run_id, mode_label, hardware_controlled=hardware_controlled)
         self._hardware_run_active = True
         self.session.hardware_run_active = True
+        self._set_run_controls_locked(True)
 
         if not hardware_controlled:
             if self.session.replicant_running and self.session.replicant_delays:
@@ -2146,6 +2236,7 @@ class RunTab(QWidget):
         self._next_tap_delay_s = None
         self._hardware_run_active = False
         self.session.hardware_run_active = False
+        self._set_run_controls_locked(False)
         if self.session.logger:
             try:
                 self.session.logger.close()
