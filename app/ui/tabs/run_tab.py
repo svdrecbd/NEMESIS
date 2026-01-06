@@ -1265,6 +1265,28 @@ class RunTab(QWidget):
             content = f"// Error reading firmware file:\n// {fw_path}\n// {exc}"
             _log_gui_exception(exc, context="Load firmware file")
 
+        if sys.platform == "darwin":
+            if not content:
+                self._show_native_alert("Firmware Error", f"Failed to load firmware from {fw_path}.")
+                return
+            if content.startswith("// Error reading firmware file:"):
+                self._show_native_alert("Firmware Error", f"Failed to load firmware from {fw_path}.")
+                return
+            try:
+                QApplication.clipboard().setText(content)
+            except Exception:
+                pass
+            opened = QDesktopServices.openUrl(QUrl.fromLocalFile(str(fw_path)))
+            if opened:
+                self._update_status("Firmware opened in the editor and copied to clipboard.")
+            else:
+                self._show_native_alert(
+                    "Firmware Open Failed",
+                    "Couldn't open the firmware in the default editor. The code was copied to the clipboard.",
+                    icon=QMessageBox.Information,
+                )
+            return
+
         dialog = QDialog(self)
         dialog.setWindowTitle("Arduino Firmware Source")
         dialog.resize(600, 500)
@@ -1302,7 +1324,6 @@ class RunTab(QWidget):
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
 
-        self._apply_macos_sheet(dialog)
         dialog.exec()
 
     def _logo_pressed(self, event):
@@ -1819,17 +1840,12 @@ class RunTab(QWidget):
         warmup = max(0.0, float(value))
         if warmup <= 0.0:
             if not self._zero_warmup_warning_shown:
-                warning = QMessageBox(self)
-                warning.setIcon(QMessageBox.Warning)
-                warning.setWindowTitle("Warmup Disabled")
-                warning.setText(
+                self._show_native_alert(
+                    "Warmup Disabled",
                     "Warmup delay is set to 0. The default warmup gives stentor time to settle and helps prevent\n"
                     "accidental double taps if the switch is flipped. With warmup disabled, the first tap fires\n"
                     "immediately when you start a host run."
                 )
-                warning.setStandardButtons(QMessageBox.Ok)
-                self._apply_macos_sheet(warning)
-                warning.exec()
                 self._zero_warmup_warning_shown = True
             self._update_status("Warmup disabled.")
         else:
@@ -1905,14 +1921,18 @@ class RunTab(QWidget):
                 pass
         self._update_status("Config loaded.")
 
-    def _apply_macos_sheet(self, widget: QWidget) -> None:
-        if sys.platform != "darwin":
-            return
-        try:
-            widget.setWindowModality(Qt.WindowModal)
-            widget.setWindowFlag(Qt.Sheet, True)
-        except Exception:
-            pass
+    def _show_native_alert(self, title: str, message: str, *, icon=QMessageBox.Warning) -> None:
+        box = QMessageBox(self)
+        box.setIcon(icon)
+        box.setWindowTitle(title)
+        box.setText(message)
+        box.setStandardButtons(QMessageBox.Ok)
+        if sys.platform == "darwin":
+            try:
+                box.setOption(QMessageBox.DontUseNativeDialog, False)
+            except Exception:
+                pass
+        box.exec()
 
     def _toggle_pro_mode(self, enabled: bool):
         self.pro_mode = bool(enabled)
