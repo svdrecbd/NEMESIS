@@ -882,7 +882,7 @@ class RunTab(QWidget):
         r2.addWidget(self.show_cv_check)
         
         self.auto_rec_check = QCheckBox("Rec")
-        self.auto_rec_check.setToolTip("Start recording automatically when run starts")
+        self.auto_rec_check.setToolTip("Start recording automatically when the run starts")
         r2b = QHBoxLayout(); r2b.addWidget(self.rec_start_btn); r2b.addWidget(self.rec_stop_btn); r2b.addWidget(self.rec_indicator); r2b.addWidget(self.auto_rec_check)
         camera_section = QVBoxLayout()
         camera_section.setContentsMargins(0, 0, 0, 0)
@@ -931,7 +931,7 @@ class RunTab(QWidget):
         self.warmup_sec.setSpecialValueText("Off")
         self.warmup_sec.setFixedWidth(CONTROL_WIDTH)
         self.warmup_sec.setToolTip(
-            "Delay before the first host-run tap (0=Off). Use to let stentor settle."
+            "Delay before the first host-run tap."
         )
 
         # Auto-stop control
@@ -1272,19 +1272,42 @@ class RunTab(QWidget):
             if content.startswith("// Error reading firmware file:"):
                 self._show_native_alert("Firmware Error", f"Failed to load firmware from {fw_path}.")
                 return
+            copied = False
             try:
                 QApplication.clipboard().setText(content)
+                copied = True
             except Exception:
-                pass
-            opened = QDesktopServices.openUrl(QUrl.fromLocalFile(str(fw_path)))
+                copied = False
+            opened = False
+            try:
+                result = subprocess.run(["open", "-a", "TextEdit", str(fw_path)], check=False)
+                opened = result.returncode == 0
+            except Exception:
+                opened = False
             if opened:
-                self._update_status("Firmware opened in the editor and copied to clipboard.")
+                if copied:
+                    self._update_status("Firmware opened in TextEdit and copied to clipboard.")
+                else:
+                    self._update_status("Firmware opened in TextEdit.")
+                if not copied:
+                    self._show_native_alert(
+                        "Firmware",
+                        "Firmware opened in TextEdit. Use Edit > Copy to copy the code.",
+                        icon=QMessageBox.Information,
+                    )
             else:
-                self._show_native_alert(
-                    "Firmware Open Failed",
-                    "Couldn't open the firmware in the default editor. The code was copied to the clipboard.",
-                    icon=QMessageBox.Information,
-                )
+                if copied:
+                    self._show_native_alert(
+                        "Firmware Open Failed",
+                        "Couldn't open the firmware in TextEdit. The code was copied to the clipboard.",
+                        icon=QMessageBox.Information,
+                    )
+                else:
+                    self._show_native_alert(
+                        "Firmware Open Failed",
+                        "Couldn't open the firmware in TextEdit.",
+                        icon=QMessageBox.Warning,
+                    )
             return
 
         dialog = QDialog(self)
@@ -1841,10 +1864,9 @@ class RunTab(QWidget):
         if warmup <= 0.0:
             if not self._zero_warmup_warning_shown:
                 self._show_native_alert(
-                    "Warmup Disabled",
-                    "Warmup delay is set to 0. The default warmup gives stentor time to settle and helps prevent\n"
-                    "accidental double taps if the switch is flipped. With warmup disabled, the first tap fires\n"
-                    "immediately when you start a host run."
+                    "Warmup disabled",
+                    "Warmup is set to 0. Recording starts immediately and the first tap fires right away,\n"
+                    "so you may miss the opening frames of the first tap (often the most important).",
                 )
                 self._zero_warmup_warning_shown = True
             self._update_status("Warmup disabled.")
@@ -2252,6 +2274,8 @@ class RunTab(QWidget):
         if self.auto_rec_check.isChecked() and not self.recorder:
             self._auto_rec_started = True
             self._start_recording()
+            if not self.recorder:
+                self._auto_rec_started = False
         if self.recorder and self.session.logger:
             try:
                 self.session.logger.set_recording_path(self.recorder.path)

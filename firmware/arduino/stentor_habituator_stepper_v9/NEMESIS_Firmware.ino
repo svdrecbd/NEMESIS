@@ -117,6 +117,12 @@ void setup() {
   pinMode(PIN_RED_LED, OUTPUT);
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   pinMode(PIN_MODE_SWITCH, INPUT_PULLUP);
+  // Sync initial hardware states to avoid spurious taps on boot/reset.
+  lastSwitchState = digitalRead(PIN_MODE_SWITCH);
+  lastButtonState = digitalRead(PIN_BUTTON);
+  unsigned long now = millis();
+  lastSwitchDebounceTime = now;
+  lastButtonDebounceTime = now;
 
   randomSeed(analogRead(0));
 
