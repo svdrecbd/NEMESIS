@@ -1,5 +1,5 @@
 # app/ui/tabs/run_tab.py
-import sys, time, json, uuid, csv
+import sys, time, json, uuid, csv, subprocess
 from collections import deque
 from pathlib import Path
 from datetime import datetime, timezone
@@ -1922,16 +1922,37 @@ class RunTab(QWidget):
         self._update_status("Config loaded.")
 
     def _show_native_alert(self, title: str, message: str, *, icon=QMessageBox.Warning) -> None:
+        if sys.platform == "darwin":
+            try:
+                def _osa_expr(value: str) -> str:
+                    lines = str(value).splitlines()
+                    if not lines:
+                        return "\"\""
+                    escaped = []
+                    for line in lines:
+                        line = line.replace("\\", "\\\\").replace("\"", "\\\"")
+                        escaped.append(f"\"{line}\"")
+                    return " & return & ".join(escaped)
+
+                level = " as informational"
+                if icon == QMessageBox.Critical:
+                    level = " as critical"
+                elif icon == QMessageBox.Warning:
+                    level = " as warning"
+                script = (
+                    f"display alert {_osa_expr(title)} "
+                    f"message {_osa_expr(message)}{level}"
+                )
+                completed = subprocess.run(["osascript", "-e", script], check=False)
+                if completed.returncode == 0:
+                    return
+            except Exception:
+                pass
         box = QMessageBox(self)
         box.setIcon(icon)
         box.setWindowTitle(title)
         box.setText(message)
         box.setStandardButtons(QMessageBox.Ok)
-        if sys.platform == "darwin":
-            try:
-                box.setOption(QMessageBox.DontUseNativeDialog, False)
-            except Exception:
-                pass
         box.exec()
 
     def _toggle_pro_mode(self, enabled: bool):
@@ -2064,6 +2085,20 @@ class RunTab(QWidget):
                 "recorded_frame_idx": getattr(self, "_recorded_frame_counter", None),
             }
         host_time = host_time_s or entry.get("host_time_s") or time.monotonic()
+        if self.session.run_start is None:
+            self.session.run_start = host_time
+            if self.session.run_dir:
+                try:
+                    self._update_run_metadata(
+                        Path(self.session.run_dir),
+                        {"run_start_host_ms": int(round(host_time * MS_PER_SEC))},
+                    )
+                except Exception:
+                    pass
+            if not self._auto_stop_timer.isActive():
+                auto_stop_min = float(self.auto_stop_min.value())
+                if auto_stop_min > 0.0:
+                    self._auto_stop_timer.start(int(auto_stop_min * SECONDS_PER_MIN * MS_PER_SEC))
         try:
             self.session.logger.log_tap(
                 host_time_s=host_time,
@@ -2151,7 +2186,7 @@ class RunTab(QWidget):
         base_dir = Path(self.outdir_edit.text().strip() or str(RUNS_DIR))
         run_dir, run_id = self._create_run_dir(base_dir)
         self.session.run_dir = str(run_dir)
-        self.session.run_start = time.monotonic()
+        self.session.run_start = None
         self.session.taps = 0
         self.session.last_run_elapsed = 0.0
         self.session.reset_tap_history()
@@ -2209,8 +2244,6 @@ class RunTab(QWidget):
 
         if self.session.replicant_ready:
             replay_targets = self.session.replicant_offsets
-            if not hardware_controlled and replay_targets and warmup_s > 0.0:
-                replay_targets = [offset + warmup_s for offset in replay_targets]
             self.live_chart.set_replay_targets(replay_targets)
             self.live_chart.mark_replay_progress(0)
         else:
@@ -2236,10 +2269,6 @@ class RunTab(QWidget):
             else:
                 first_delay_s = warmup_s
             self._schedule_next_tap(first_delay_s, track_next=False)
-
-        auto_stop_min = float(self.auto_stop_min.value())
-        if auto_stop_min > 0.0:
-            self._auto_stop_timer.start(int(auto_stop_min * SECONDS_PER_MIN * MS_PER_SEC))
 
         if not self.serial or not self.serial.is_open():
             status_msg = "Run started (serial disconnected)."
@@ -2290,9 +2319,9 @@ class RunTab(QWidget):
                 pass
             self.session.frame_logger = None
 
-        if self._auto_rec_started:
+        if self.recorder:
             self._stop_recording()
-            self._auto_rec_started = False
+        self._auto_rec_started = False
 
         if self.session.run_dir:
             try:
