@@ -367,7 +367,7 @@ void checkTimedPulse() {
     if (intervalUs == 0UL) {
       intervalUs = MIN_INTERVAL_US;
     }
-    session.nextTapMicros = tapStartMicros + intervalUs;
+    session.nextTapMicros += intervalUs;
     Serial.print(F("Next random tap scheduled in "));
     Serial.print(intervalMs / MS_PER_SEC, SERIAL_TIME_PRECISION);
     Serial.println(F(" seconds.\n"));
@@ -382,7 +382,7 @@ void checkTimedPulse() {
     if (delayUs < MIN_INTERVAL_US) {
       delayUs = MIN_INTERVAL_US;
     }
-    session.nextTapMicros = tapStartMicros + delayUs;
+    session.nextTapMicros += delayUs;
   }
 }
 

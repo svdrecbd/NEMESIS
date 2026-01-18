@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import (
     QTimer, Qt, Signal, Slot, QUrl, QPropertyAnimation, QEasingCurve,
-    QAbstractAnimation
+    QAbstractAnimation, QPoint
 )
 from PySide6.QtGui import (
     QImage,
@@ -135,6 +135,234 @@ MS_PER_SEC = 1000.0
 
 def _log_gui_exception(e: Exception, context: str = "GUI operation") -> None:
     APP_LOGGER.error(f"Unhandled GUI exception in {context}: {e}", exc_info=True)
+
+
+class ThemedDialog(QDialog):
+    def __init__(self, parent=None, title=""):
+        # Detach from parent for WM to ensure frameless works, but keep ref
+        super().__init__(None)
+        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        
+        # Main layout (Outer shell)
+        self._main_layout = QVBoxLayout(self)
+        self._main_layout.setContentsMargins(0, 0, 0, 0)
+        self._main_layout.setSpacing(0)
+        
+        # Styling
+        theme = active_theme()
+        bg = theme.get("BG", BG)
+        text = theme.get("TEXT", TEXT)
+        border = theme.get("BORDER", BORDER)
+        mid = theme.get("MID", MID)
+        
+        # Frame to draw border/bg
+        self._frame = QFrame()
+        self._frame.setObjectName("DialogFrame")
+        self._frame.setStyleSheet(f"QFrame#DialogFrame {{ background: {bg}; border: 1px solid {border}; }}")
+        self._main_layout.addWidget(self._frame)
+        
+        self._frame_layout = QVBoxLayout(self._frame)
+        self._frame_layout.setContentsMargins(0, 0, 0, 0)
+        self._frame_layout.setSpacing(0)
+        
+        # Title Bar
+        self._title_bar = QWidget()
+        self._title_bar.setStyleSheet(f"background: {mid}; border-bottom: 1px solid {border};")
+        self._title_bar.setFixedHeight(36)
+        
+        title_layout = QHBoxLayout(self._title_bar)
+        title_layout.setContentsMargins(12, 0, 4, 0)
+        
+        self._title_label = QLabel(title)
+        self._title_label.setStyleSheet(f"color: {text}; font-weight: bold; border: none; background: transparent;")
+        title_layout.addWidget(self._title_label)
+        title_layout.addStretch(1)
+        
+        self._close_btn = QPushButton("×")
+        self._close_btn.setFixedSize(32, 32)
+        self._close_btn.setCursor(Qt.PointingHandCursor)
+        self._close_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; 
+                border: none; 
+                color: {text}; 
+                font-size: 20px;
+                font-weight: bold;
+                padding: 0;
+                margin: 0;
+            }}
+            QPushButton:hover {{
+                background: {DANGER}; 
+                color: white;
+            }}
+        """)
+        self._close_btn.clicked.connect(self.close)
+        title_layout.addWidget(self._close_btn)
+        
+        self._frame_layout.addWidget(self._title_bar)
+        
+        # Content Area
+        self._content_widget = QWidget()
+        self._content_layout = QVBoxLayout(self._content_widget)
+        self._content_layout.setContentsMargins(16, 16, 16, 16)
+        self._content_layout.setSpacing(12)
+        
+        self._frame_layout.addWidget(self._content_widget, 1)
+        
+        # Drag state
+        self._dragging = False
+        self._drag_pos = QPoint()
+
+    def apply_theme(self):
+        theme = active_theme()
+        bg = theme.get("BG", BG)
+        text = theme.get("TEXT", TEXT)
+        border = theme.get("BORDER", BORDER)
+        mid = theme.get("MID", MID)
+        
+        self._frame.setStyleSheet(f"QFrame#DialogFrame {{ background: {bg}; border: 1px solid {border}; }}")
+        self._title_bar.setStyleSheet(f"background: {mid}; border-bottom: 1px solid {border};")
+        if hasattr(self, "_title_label"):
+            self._title_label.setStyleSheet(f"color: {text}; font-weight: bold; border: none; background: transparent;")
+        if hasattr(self, "_close_btn"):
+            self._close_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent; 
+                    border: none; 
+                    color: {text}; 
+                    font-size: 20px;
+                    font-weight: bold;
+                    padding: 0;
+                    margin: 0;
+                }}
+                QPushButton:hover {{
+                    background: {DANGER}; 
+                    color: white;
+                }}
+            """)
+
+    def setWindowTitle(self, title):
+        super().setWindowTitle(title)
+        if hasattr(self, "_title_label"):
+            self._title_label.setText(title)
+
+    def content_layout(self):
+        return self._content_layout
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            # Map click to title bar coords to check containment
+            # title bar is at 0,0 of frame? No, frame is in self.
+            # Easiest: Check if click is in top 36px of the window
+            if event.position().y() <= self._title_bar.height():
+                self._dragging = True
+                self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                event.accept()
+            else:
+                super().mousePressEvent(event)
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._dragging and event.buttons() & Qt.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._dragging = False
+        super().mouseReleaseEvent(event)
+
+
+class SettingsDialog(ThemedDialog):
+    def __init__(self, parent_tab):
+        super().__init__(parent_tab, title="NEMESIS Settings")
+        self.parent_tab = parent_tab
+        self.setFixedSize(300, 450)
+        
+        layout = self.content_layout()
+        
+        # Theme
+        layout.addWidget(QLabel("Theme"))
+        theme_layout = QHBoxLayout()
+        self.btn_light = QPushButton("Light")
+        self.btn_light.setCheckable(True)
+        self.btn_light.clicked.connect(lambda: self._set_theme("light"))
+        theme_layout.addWidget(self.btn_light)
+        
+        self.btn_dark = QPushButton("Dark")
+        self.btn_dark.setCheckable(True)
+        self.btn_dark.clicked.connect(lambda: self._set_theme("dark"))
+        theme_layout.addWidget(self.btn_dark)
+        layout.addLayout(theme_layout)
+        
+        layout.addWidget(self._make_line())
+        
+        # Layout
+        layout.addWidget(QLabel("Layout"))
+        self.check_mirror = QCheckBox("Mirror Layout")
+        self.check_mirror.toggled.connect(parent_tab._set_mirror_mode)
+        layout.addWidget(self.check_mirror)
+        
+        self.check_wide = QCheckBox("Wide Layout (Top/Bottom)")
+        self.check_wide.toggled.connect(parent_tab._set_wide_mode)
+        layout.addWidget(self.check_wide)
+        
+        layout.addWidget(self._make_line())
+        
+        # Actions
+        btn_fw = QPushButton("Show Firmware Code...")
+        btn_fw.clicked.connect(parent_tab._show_firmware_dialog)
+        layout.addWidget(btn_fw)
+        
+        btn_ports = QPushButton("Refresh Ports")
+        btn_ports.clicked.connect(parent_tab._refresh_serial_ports)
+        layout.addWidget(btn_ports)
+        
+        btn_runs = QPushButton("Open Runs Folder")
+        btn_runs.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(RUNS_DIR.resolve()))))
+        layout.addWidget(btn_runs)
+        
+        layout.addStretch(1)
+        
+        # Footer
+        link_layout = QHBoxLayout()
+        btn_readme = QPushButton("README")
+        btn_readme.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(GITHUB_README_URL)))
+        link_layout.addWidget(btn_readme)
+        
+        btn_cn = QPushButton("California Numerics")
+        btn_cn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(CALIFORNIA_NUMERICS_URL)))
+        link_layout.addWidget(btn_cn)
+        layout.addLayout(link_layout)
+        
+        self._sync_state()
+
+    def _make_line(self):
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Sunken)
+        return line
+
+    def _set_theme(self, name):
+        self.parent_tab._apply_theme(name)
+        self.apply_theme()
+        self._sync_state()
+
+    def _sync_state(self):
+        # Sync Theme buttons
+        is_light = self.parent_tab._theme_name == "light"
+        self.btn_light.setChecked(is_light)
+        self.btn_dark.setChecked(not is_light)
+        # Sync Layout checks
+        self.check_mirror.setChecked(self.parent_tab._mirror_mode)
+        self.check_wide.setChecked(self.parent_tab._wide_mode)
+    
+    def showEvent(self, event):
+        self._sync_state()
+        super().showEvent(event)
 
 
 class RunTab(QWidget):
@@ -357,6 +585,13 @@ class RunTab(QWidget):
                 self._action_mirror_mode.blockSignals(False)
             except Exception:
                 pass
+        if hasattr(self, "_action_wide_mode") and self._action_wide_mode:
+            try:
+                self._action_wide_mode.blockSignals(True)
+                self._action_wide_mode.setChecked(self._wide_mode)
+                self._action_wide_mode.blockSignals(False)
+            except Exception:
+                pass
 
     def _apply_theme(self, name: str, *, broadcast: bool = True, force: bool = False):
         if not force and name == self._theme_name:
@@ -396,18 +631,219 @@ class RunTab(QWidget):
     def apply_theme_external(self, name: str):
         self._apply_theme(name, broadcast=False, force=True)
 
+    def _set_wide_mode(self, enabled: bool):
+        enabled = bool(enabled)
+        if enabled == self._wide_mode:
+            return
+        self._wide_mode = enabled
+        self._update_layout_structure()
+        self._sync_logo_menu_checks()
+
+    def _update_layout_structure(self):
+        target_orientation = Qt.Vertical if self._wide_mode else Qt.Horizontal
+        
+        # 1. Update Content Layout (Video/Chart)
+        video = self.video_area
+        chart = self.chart_frame
+        
+        # Ensure they are not deleted when we switch containers
+        # We park them on 'self' temporarily
+        video.setParent(self)
+        chart.setParent(self)
+        video.setVisible(True)
+        chart.setVisible(True)
+
+        new_content_container = QWidget()
+        new_content_container.setAutoFillBackground(True)
+        if self._left_widget:
+            new_content_container.setPalette(self._left_widget.palette())
+        
+        if self._wide_mode:
+            # Wide Mode: Top container is Horizontal [Video | Chart]
+            layout = QHBoxLayout(new_content_container)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(SPACING_MD)
+            
+            # Force expansion
+            video.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            chart.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            
+            layout.addWidget(video, 1)
+            layout.addWidget(chart, 1)
+        else:
+            # Standard Mode: Left container is Vertical [Video / Chart]
+            layout = QVBoxLayout(new_content_container)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(SPACING_MD)
+            
+            # Restore smart sizing policies
+            # AspectRatioContainer needs HeightForWidth in vertical stack
+            sp_video = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            sp_video.setHeightForWidth(True)
+            video.setSizePolicy(sp_video)
+            
+            # Chart can be preferred
+            chart.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            
+            # Allow them to take available space (don't align Top)
+            layout.addWidget(video, 1)
+            layout.addWidget(chart, 1)
+            # Remove stretch at end so they fill the space naturally
+            # layout.addStretch(1) 
+
+        new_content_container.setMinimumSize(100, 100)
+        new_content_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        new_content_container.show()
+
+        # Update Splitter
+        if self._left_widget:
+            # Check if it's currently in the splitter
+            idx = self.splitter.indexOf(self._left_widget)
+            if idx >= 0:
+                self._left_widget.hide()
+                self.splitter.replaceWidget(idx, new_content_container)
+                self._left_widget.deleteLater()
+            else:
+                self.splitter.addWidget(new_content_container)
+        else:
+            self.splitter.addWidget(new_content_container)
+            
+        self._left_widget = new_content_container
+        
+        # 2. Rebuild Control Layout
+        self._rebuild_control_layout(self._wide_mode)
+
+        # 3. Orientation & Sizing
+        if self.splitter.orientation() != target_orientation:
+            self.splitter.setOrientation(target_orientation)
+
+        if self._wide_mode:
+            self.splitter.setCollapsible(0, False)
+            self.splitter.setCollapsible(1, False)
+            # Size will be fixed by _update_mirror_layout immediately after
+            # Lock window width to prevent column crushing
+            self.splitter.setSizes([1000, 250])
+            self.setMinimumWidth(1300)
+        else:
+            self.splitter.setCollapsible(0, False)
+            self.splitter.setCollapsible(1, False)
+            self.splitter.setSizes([1000, 380])
+            # Restore standard minimum width
+            self.setMinimumWidth(APP_MIN_SIZE[0])
+
+        self._update_mirror_layout()
+        
+        # Schedule a forced update to ensure widgets appear
+        # This fixes issues where reparented widgets remain hidden or zero-sized
+        QTimer.singleShot(0, self._finalize_layout_update)
+
+    def _finalize_layout_update(self):
+        try:
+            # Force visibility and updates on content widgets
+            if hasattr(self, "video_area"):
+                self.video_area.setVisible(True)
+                self.video_area.updateGeometry()
+            if hasattr(self, "chart_frame"):
+                self.chart_frame.setVisible(True)
+                self.chart_frame.updateGeometry()
+            if getattr(self, "_left_widget", None):
+                self._left_widget.setVisible(True)
+            
+            # Re-apply sizes using the centralized logic
+            self._update_mirror_layout()
+        except Exception:
+            pass
+
+    def _rebuild_control_layout(self, is_wide: bool):
+        # 1. Create New Main Layout
+        old_widget = self._right_widget
+        new_widget = QWidget()
+        new_widget.setAutoFillBackground(True)
+        new_widget.setPalette(old_widget.palette())
+        
+        # sections: 0=Header, 1=Serial, 2=Camera, 3=Mode, 4=IO, 5=Footer(Stats), 6=Logo
+        sections = self._section_layouts
+        
+        # Detach sections from old layout
+        for section in sections:
+            section.setParent(None) 
+        
+        if is_wide:
+            main_layout = QHBoxLayout(new_widget)
+            main_layout.setContentsMargins(SPACING_MD, SPACING_MD, SPACING_MD, SPACING_MD)
+            main_layout.setSpacing(SECTION_GAP_LARGE)
+            
+            # Helper to create an equal-width column
+            def make_col(*layouts):
+                col_widget = QWidget()
+                col_layout = QVBoxLayout(col_widget)
+                col_layout.setContentsMargins(0, 0, 0, 0)
+                col_layout.setSpacing(SPACING_SM)
+                for l in layouts:
+                    col_layout.addLayout(l)
+                col_layout.addStretch(1)
+                
+                # Critical: Force equal width by ignoring content size hints
+                # QSizePolicy.Ignored tells the layout to only use stretch factors
+                sp = QSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+                sp.setHorizontalStretch(1)
+                col_widget.setSizePolicy(sp)
+                return col_widget
+
+            # Col 1: Status Line + Serial
+            w1 = make_col(sections[0], sections[1], sections[5])
+            
+            # Col 2: Camera + Recording
+            w2 = make_col(sections[2])
+            
+            # Col 3: Mode + Config
+            w3 = make_col(sections[3])
+            
+            # Col 4: IO + Logo
+            w4 = make_col(sections[4], sections[6])
+            
+            main_layout.addWidget(w1)
+            main_layout.addWidget(w2)
+            main_layout.addWidget(w3)
+            main_layout.addWidget(w4)
+            
+        else:
+            main_layout = QVBoxLayout(new_widget)
+            # Match original margins
+            main_layout.setContentsMargins(0, RIGHT_PANEL_TOP_MARGIN, 0, 0)
+            main_layout.setSpacing(SECTION_GAP_LARGE)
+            
+            for i, section in enumerate(sections):
+                main_layout.addLayout(section)
+                if i == len(sections) - 1:
+                    main_layout.addStretch(1)
+        
+        # Replace widget in scroll area
+        self._right_scroll.setWidget(new_widget)
+        self._right_widget = new_widget
+        self._right_layout = main_layout
+        
+        # Ensure minimums
+        if is_wide:
+            new_widget.setMinimumWidth(1300) # Match window constraint
+            new_widget.setMinimumHeight(200)
+        else:
+            new_widget.setMinimumWidth(RIGHT_PANEL_MIN_WIDTH)
+            new_widget.setMinimumHeight(600)
+
     def _update_mirror_layout(self):
         split = getattr(self, "splitter", None)
-        left = getattr(self, "_left_widget", None)   # Video pane
-        right = getattr(self, "_right_scroll", None) # Controls pane (scroll container)
+        left = getattr(self, "_left_widget", None)   # Video/Chart Container
+        right = getattr(self, "_right_scroll", None) # Controls Container
         if split is None or left is None or right is None:
             return
         
-        # Mirror mode: Controls (right) | Video (left)
-        # Normal mode: Video (left) | Controls (right)
+        # Mirror mode logic:
+        # Standard: Content -> Controls
+        # Mirror: Controls -> Content
         desired = (right, left) if self._mirror_mode else (left, right)
         
-        # Reorder widgets if needed
+        # Reorder widgets
         for idx, widget in enumerate(desired):
             current_idx = split.indexOf(widget)
             if current_idx == -1 or current_idx == idx:
@@ -418,27 +854,47 @@ class RunTab(QWidget):
             finally:
                 split.blockSignals(False)
         
-        # Enforce strict sizing: Controls get minimal width, Video gets the rest
+        # Enforce strict sizing policies
+        is_vertical = (split.orientation() == Qt.Vertical)
+        
         try:
+            # Determine fixed size for controls pane
+            fixed_size = MIRROR_SPLITTER_FIXED_WIDTH 
+            if is_vertical:
+                # Use a slightly smaller height for controls in vertical mode if desired
+                # But 380 is a safe bet for the scroll area content
+                fixed_size = 250 
+
+            # Apply sizes based on mirror mode
             if self._mirror_mode:
-                # [Controls, Video]
-                split.setSizes([MIRROR_SPLITTER_FIXED_WIDTH, MIRROR_SPLITTER_FILL])
+                # [Controls, Content]
+                if is_vertical:
+                    # Wide Mode Mirrored: Controls on Top
+                    split.setSizes([fixed_size, 10000])
+                else:
+                    # Standard Mode Mirrored: Controls on Left
+                    split.setSizes([fixed_size, MIRROR_SPLITTER_FILL])
             else:
-                # [Video, Controls]
-                split.setSizes([MIRROR_SPLITTER_FILL, MIRROR_SPLITTER_FIXED_WIDTH])
+                # [Content, Controls]
+                if is_vertical:
+                    # Wide Mode Standard: Controls on Bottom
+                    split.setSizes([10000, fixed_size])
+                else:
+                    # Standard Mode Standard: Controls on Right
+                    split.setSizes([MIRROR_SPLITTER_FILL, fixed_size])
         except Exception:
             pass
 
         try:
-            # Ensure Video (left) stretches and Controls (right) are fixed
-            idx_video = split.indexOf(left)
+            # Ensure Content stretches and Controls are fixed
+            idx_content = split.indexOf(left)
             idx_ctrl = split.indexOf(right)
-            if idx_video >= 0:
-                split.setStretchFactor(idx_video, 1)
+            if idx_content >= 0:
+                split.setStretchFactor(idx_content, 1)
             if idx_ctrl >= 0:
                 split.setStretchFactor(idx_ctrl, 0)
             
-            # Re-disable handle to prevent sliding, but keep 10px gap
+            # Re-disable handle interaction but keep spacing
             split.setHandleWidth(SPLITTER_HANDLE_WIDTH)
             split.setRubberBand(-1)
             handle = split.handle(1)
@@ -536,6 +992,8 @@ class RunTab(QWidget):
         self._theme_name = _ACTIVE_THEME_NAME
         self._theme = dict(active_theme())
         self._mirror_mode = False
+        self._wide_mode = False
+        self._settings_dialog = None
         self._theme_overlay: QWidget | None = None
         self._theme_overlay_anim: QPropertyAnimation | None = None
 
@@ -1225,6 +1683,11 @@ class RunTab(QWidget):
         self._action_mirror_mode.toggled.connect(self._set_mirror_mode)
         menu.addAction(self._action_mirror_mode)
 
+        self._action_wide_mode = QAction("Wide Layout (Top/Bottom)", menu)
+        self._action_wide_mode.setCheckable(True)
+        self._action_wide_mode.toggled.connect(self._set_wide_mode)
+        menu.addAction(self._action_wide_mode)
+
         menu.addSeparator()
 
         action_fw = QAction("Show Firmware Code...", menu)
@@ -1265,56 +1728,11 @@ class RunTab(QWidget):
             content = f"// Error reading firmware file:\n// {fw_path}\n// {exc}"
             _log_gui_exception(exc, context="Load firmware file")
 
-        if sys.platform == "darwin":
-            if not content:
-                self._show_native_alert("Firmware Error", f"Failed to load firmware from {fw_path}.")
-                return
-            if content.startswith("// Error reading firmware file:"):
-                self._show_native_alert("Firmware Error", f"Failed to load firmware from {fw_path}.")
-                return
-            copied = False
-            try:
-                QApplication.clipboard().setText(content)
-                copied = True
-            except Exception:
-                copied = False
-            opened = False
-            try:
-                result = subprocess.run(["open", "-a", "TextEdit", str(fw_path)], check=False)
-                opened = result.returncode == 0
-            except Exception:
-                opened = False
-            if opened:
-                if copied:
-                    self._update_status("Firmware opened in TextEdit and copied to clipboard.")
-                else:
-                    self._update_status("Firmware opened in TextEdit.")
-                if not copied:
-                    self._show_native_alert(
-                        "Firmware",
-                        "Firmware opened in TextEdit. Use Edit > Copy to copy the code.",
-                        icon=QMessageBox.Information,
-                    )
-            else:
-                if copied:
-                    self._show_native_alert(
-                        "Firmware Open Failed",
-                        "Couldn't open the firmware in TextEdit. The code was copied to the clipboard.",
-                        icon=QMessageBox.Information,
-                    )
-                else:
-                    self._show_native_alert(
-                        "Firmware Open Failed",
-                        "Couldn't open the firmware in TextEdit.",
-                        icon=QMessageBox.Warning,
-                    )
-            return
+        dialog = ThemedDialog(self, title="Arduino Firmware Source")
+        dialog.resize(700, 600)
 
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Arduino Firmware Source")
-        dialog.resize(600, 500)
-
-        layout = QVBoxLayout(dialog)
+        layout = dialog.content_layout()
+        
         info = QLabel("Copy this code and flash it to your Arduino via the Arduino IDE.")
         info.setWordWrap(True)
         layout.addWidget(info)
@@ -1323,6 +1741,7 @@ class RunTab(QWidget):
         editor.setPlainText(content)
         editor.setReadOnly(True)
         try:
+            # Try to use a monospaced font
             font = QFontDatabase.systemFont(QFontDatabase.FixedFont)
             editor.setFont(font)
         except Exception:
@@ -1330,12 +1749,18 @@ class RunTab(QWidget):
         layout.addWidget(editor)
 
         btn_row = QHBoxLayout()
-        copy_btn = QPushButton("Copy All")
+        copy_btn = QPushButton("Copy All to Clipboard")
 
         def _copy():
             editor.selectAll()
             editor.copy()
+            # Deselect to show it's done, or just give feedback
+            cursor = editor.textCursor()
+            cursor.clearSelection()
+            editor.setTextCursor(cursor)
             self._update_status("Firmware code copied to clipboard.")
+            copy_btn.setText("Copied!")
+            QTimer.singleShot(2000, lambda: copy_btn.setText("Copy All to Clipboard"))
 
         copy_btn.clicked.connect(_copy)
 
@@ -1350,17 +1775,12 @@ class RunTab(QWidget):
         dialog.exec()
 
     def _logo_pressed(self, event):
-        menu = getattr(self, "logo_menu", None)
-        if not menu:
-            return
-        try:
-            anchor = self.logo_footer.mapToGlobal(self.logo_footer.rect().bottomLeft())
-        except Exception:
-            anchor = QCursor.pos()
-        try:
-            menu.exec(anchor)
-        except Exception:
-            pass
+        if self._settings_dialog is None:
+            self._settings_dialog = SettingsDialog(self)
+        
+        self._settings_dialog.show()
+        self._settings_dialog.raise_()
+        self._settings_dialog.activateWindow()
 
     def _apply_titlebar_theme(self):
         try:
@@ -2219,6 +2639,7 @@ class RunTab(QWidget):
         self._contraction_count = 0
         self._auto_stop_pending_taps = None
         self._next_tap_delay_s = None
+        self._next_host_target_time = None
         self.live_chart.reset()
         current_results = getattr(self.session, "cv_results", None) or []
         self._last_cv_states = {result.id: result.state for result in current_results}
@@ -2292,6 +2713,10 @@ class RunTab(QWidget):
                 first_delay_s = warmup_s + self.session.replicant_delays[0]
             else:
                 first_delay_s = warmup_s
+            
+            # Absolute Scheduling Init
+            now = time.monotonic()
+            self._next_host_target_time = now + first_delay_s
             self._schedule_next_tap(first_delay_s, track_next=False)
 
         if not self.serial or not self.serial.is_open():
@@ -2321,6 +2746,7 @@ class RunTab(QWidget):
         self._auto_stop_timer.stop()
         self._auto_stop_pending_taps = None
         self._next_tap_delay_s = None
+        self._next_host_target_time = None
         self._hardware_run_active = False
         self.session.hardware_run_active = False
         self._set_run_controls_locked(False)
@@ -2374,31 +2800,48 @@ class RunTab(QWidget):
     def _on_tap_due(self):
         if not self._hardware_run_active or not self._run_controlled_by_host:
             return
+            
+        # 1. Execute the Tap (Send Command)
+        mode_label = self.mode.currentText().strip() or "Periodic"
+        mark = "scheduled"
+        
         if self.session.replicant_running:
+            mode_label = "Replicant"
             if self.session.replicant_index >= len(self.session.replicant_delays):
                 self._stop_run()
                 return
-            self._queue_pending_tap("Replicant", "scheduled")
-            sent = self._send_serial_char("t", "Replicant tap")
-            if not sent:
-                self._log_pending_tap(None)
-            self.session.replicant_index += 1
-            if self.session.replicant_index < len(self.session.replicant_delays):
-                if self._should_schedule_next_tap():
-                    self._schedule_next_tap(self.session.replicant_delays[self.session.replicant_index])
-                else:
-                    self._next_tap_delay_s = None
-            else:
-                self._stop_run()
-            return
-
-        mode_label = self.mode.currentText().strip() or "Periodic"
-        self._queue_pending_tap(mode_label, "scheduled")
-        sent = self._send_serial_char("t", "Scheduled tap")
+            
+        self._queue_pending_tap(mode_label, mark)
+        sent = self._send_serial_char("t", f"{mode_label} tap")
         if not sent:
             self._log_pending_tap(None)
+
+        # 2. Schedule Next (Absolute Timing)
+        if self.session.replicant_running:
+            self.session.replicant_index += 1
+            if self.session.replicant_index < len(self.session.replicant_delays):
+                # Replicant: Targets are pre-calculated offsets. 
+                # Ideally, we'd base this on run_start + offset[i].
+                # But to fit existing logic, we just add the delta.
+                delta = self.session.replicant_delays[self.session.replicant_index]
+                if self._next_host_target_time is None:
+                    self._next_host_target_time = time.monotonic()
+                self._next_host_target_time += delta
+            else:
+                self._stop_run()
+                return
+        else:
+            # Periodic/Poisson
+            delta = self.session.scheduler.next_delay_s()
+            if self._next_host_target_time is None:
+                 self._next_host_target_time = time.monotonic()
+            self._next_host_target_time += delta
+
         if self._should_schedule_next_tap():
-            self._schedule_next_tap(self.session.scheduler.next_delay_s())
+            now = time.monotonic()
+            delay = self._next_host_target_time - now
+            # If we are late (negative delay), fire immediately (0) to catch up
+            self._schedule_next_tap(max(0.0, delay))
         else:
             self._next_tap_delay_s = None
 

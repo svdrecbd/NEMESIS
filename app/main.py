@@ -20,7 +20,7 @@ from app.ui.widgets.containers import LeftAlignTabBar
 
 _APP_ICON = None
 _FONT_FAMILY = "Typestar OCR Regular"
-APP_DEFAULT_SIZE = (1320, 820)
+APP_DEFAULT_SIZE = (1520, 940)
 APP_MIN_SIZE = (1280, 780)
 APP_ICON_SIZES = (16, 32, 64, 128, 256)
 TAB_CLOSE_BUTTON_SIZE = 12

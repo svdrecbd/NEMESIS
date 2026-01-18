@@ -48,3 +48,6 @@ dist/
 *.exe
 *.app/
 *.dSYM/
+
+# Internal Lab Notes (Local Only)
+INTERNAL_LAB_NOTES.md

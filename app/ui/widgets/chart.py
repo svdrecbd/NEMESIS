@@ -203,7 +203,10 @@ class LiveChart:
         max_elapsed_sec_contractions = max(self.contraction_times_sec) if self.contraction_times_sec else 0.0
         max_elapsed_sec_script = max(self.replay_targets) if self.replay_targets else 0.0
         max_elapsed_sec = max(max_elapsed_sec_actual, max_elapsed_sec_script, max_elapsed_sec_contractions)
-        if max_elapsed_sec <= 0:
+        
+        has_any_data = bool(self.times_sec or self.contraction_times_sec or self.replay_targets)
+
+        if not has_any_data:
             self._configure_standard_axes(0.0)
             self._set_long_mode(False)
             self._set_heatmap_state(False)
@@ -245,6 +248,7 @@ class LiveChart:
 
         ax_bot.set_visible(True)
         ax_top.set_ylabel("Taps", color=text_color)
+        ax_top.set_ylim(0.0, 1.0)
         ax_top.set_yticks([])
         ax_top.tick_params(axis='x', colors=text_color)
         ax_top.tick_params(axis='y', colors=text_color)
