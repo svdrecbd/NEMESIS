@@ -1,5 +1,5 @@
 # app/ui/tabs/run_tab.py
-import sys, time, json, uuid, csv, subprocess
+import sys, time, json, uuid, csv, subprocess, io, os
 from collections import deque
 from pathlib import Path
 from datetime import datetime, timezone
@@ -9,7 +9,8 @@ from PySide6.QtWidgets import (
     QWidget, QLabel, QPushButton, QFileDialog, QHBoxLayout, QVBoxLayout, QGridLayout, 
     QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit, QMessageBox, QSizePolicy, 
     QListView, QSplitter, QFrame, QSpacerItem, QCheckBox, QMenu, QDialog,
-    QApplication, QScrollArea, QGraphicsOpacityEffect, QPlainTextEdit
+    QApplication, QScrollArea, QGraphicsOpacityEffect, QPlainTextEdit,
+    QStackedWidget
 )
 from PySide6.QtCore import (
     QTimer, Qt, Signal, Slot, QUrl, QPropertyAnimation, QEasingCurve,
@@ -30,7 +31,10 @@ from PySide6.QtGui import (
 from serial.tools import list_ports
 
 from app.core import video, configio
-from app.core.logger import APP_LOGGER, RunLogger, TrackingLogger, FrameLogger, configure_file_logging
+from app.core.logger import (
+    APP_LOGGER, RunLogger, TrackingLogger, FrameLogger, configure_file_logging,
+    CSV_FIELDS, TRACKING_FIELDS, FRAME_FIELDS,
+)
 from app.core.session import RunSession
 from app.core.version import APP_VERSION
 from app.core.workers import FrameWorker, ProcessCVWorker, RenderWorker
@@ -44,6 +48,11 @@ from app.ui.theme import (
 from app.ui.widgets.viewer import ZoomView, PinnedPreviewWindow, AppZoomView
 from app.ui.widgets.chart import LiveChart
 from app.ui.widgets.containers import AspectRatioContainer
+
+try:
+    import psutil
+except Exception:
+    psutil = None
 
 FOOTER_LOGO_SCALE = 0.036
 _ACTIVE_THEME_NAME = "light"
@@ -126,12 +135,52 @@ STEPSIZE_OPTIONS = [
     "5 (1/16 Step)",
 ]
 RUN_DIR_CREATE_RETRIES = 5
-RUN_SCHEMA_VERSION = 3
+RUN_SCHEMA_VERSION = 6
 GITHUB_README_URL = "https://github.com/svdrecbd/NEMESIS"
 CALIFORNIA_NUMERICS_URL = "https://www.californianumerics.com/nemesis/"
 MIN_TIMER_DELAY_MS = 1
 SECONDS_PER_MIN = 60.0
 MS_PER_SEC = 1000.0
+LOW_DISK_TRACKING_DECIMATE = 2
+LOW_DISK_STATUS_LABEL = "LOW DISK MODE (15 FPS LOG)"
+DISK_FULL_STATUS_LABEL = "DISK FULL (BUFFERING)"
+STARTER_GUIDE_VERSION = 1
+DISK_CALIBRATION_DURATION_S = 15.0
+DISK_ESTIMATE_MARGIN = 1.5
+DISK_ESTIMATE_GB_DIVISOR = 1_000_000_000.0
+DIAG_SAMPLE_INTERVAL_S_DEFAULT = 10.0
+DIAG_SAMPLE_INTERVAL_MIN_S = 2.0
+DIAG_SAMPLE_INTERVAL_MAX_S = 60.0
+DIAG_FILE_NAME = "diagnostics.csv"
+DIAG_FIELDS = [
+    "timestamp_iso",
+    "t_host_s",
+    "arm_name",
+    "run_id",
+    "run_elapsed_s",
+    "camera_open",
+    "camera_fps_est",
+    "cv_fps_est",
+    "rec_fps_est",
+    "rec_drop_fps",
+    "rec_queue_depth",
+    "rec_queue_max",
+    "serial_connected",
+    "camera_dead",
+    "low_disk_mode",
+    "tracking_decimate",
+    "cpu_process_pct",
+    "cpu_system_pct",
+    "cpu_other_pct",
+    "mem_process_mb",
+    "mem_system_pct",
+    "load_1m",
+    "threads",
+    "disk_free_gb",
+    "disk_write_mb_s",
+    "metrics_source",
+    "note",
+]
 
 def _log_gui_exception(e: Exception, context: str = "GUI operation") -> None:
     APP_LOGGER.error(f"Unhandled GUI exception in {context}: {e}", exc_info=True)
@@ -141,6 +190,8 @@ class ThemedDialog(QDialog):
     def __init__(self, parent=None, title=""):
         # Detach from parent for WM to ensure frameless works, but keep ref
         super().__init__(None)
+        self._parent_ref = parent
+        self._positioned = False
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         
@@ -275,12 +326,37 @@ class ThemedDialog(QDialog):
         self._dragging = False
         super().mouseReleaseEvent(event)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._positioned:
+            return
+        self._positioned = True
+        try:
+            parent = self._parent_ref
+            if parent is not None:
+                try:
+                    anchor = parent.window()
+                    if anchor is None:
+                        anchor = parent
+                    geo = anchor.frameGeometry()
+                except Exception:
+                    geo = parent.frameGeometry()
+                center = geo.center()
+                self.move(center - self.rect().center())
+            else:
+                screen = QApplication.primaryScreen()
+                if screen:
+                    center = screen.availableGeometry().center()
+                    self.move(center - self.rect().center())
+        except Exception:
+            pass
+
 
 class SettingsDialog(ThemedDialog):
     def __init__(self, parent_tab):
         super().__init__(parent_tab, title="NEMESIS Settings")
         self.parent_tab = parent_tab
-        self.setFixedSize(300, 450)
+        self.setFixedSize(380, 620)
         
         layout = self.content_layout()
         
@@ -311,11 +387,46 @@ class SettingsDialog(ThemedDialog):
         layout.addWidget(self.check_wide)
         
         layout.addWidget(self._make_line())
+
+        # Diagnostics
+        layout.addWidget(QLabel("Diagnostics"))
+        self.check_diag = QCheckBox("Enable Diagnostics Mode")
+        self.check_diag.setChecked(parent_tab._diagnostics_enabled)
+        self.check_diag.toggled.connect(parent_tab._set_diagnostics_enabled)
+        layout.addWidget(self.check_diag)
+        diag_note = QLabel("Diagnostics writes a diagnostics.csv for long-run health + benchmarking.")
+        diag_note.setStyleSheet("font-size: 9pt; font-style: italic;")
+        diag_note.setWordWrap(True)
+        layout.addWidget(diag_note)
+        interval_row = QHBoxLayout()
+        interval_row.addWidget(QLabel("Sample interval:"))
+        self.diag_interval = QSpinBox()
+        self.diag_interval.setRange(int(DIAG_SAMPLE_INTERVAL_MIN_S), int(DIAG_SAMPLE_INTERVAL_MAX_S))
+        self.diag_interval.setValue(int(parent_tab._diagnostics_interval_s))
+        self.diag_interval.setSuffix(" s")
+        self.diag_interval.valueChanged.connect(parent_tab._set_diagnostics_interval)
+        interval_row.addWidget(self.diag_interval)
+        interval_row.addStretch(1)
+        layout.addLayout(interval_row)
+        if psutil is None:
+            warn = QLabel("psutil not available: diagnostics will be limited.")
+            warn.setStyleSheet("font-size: 9pt; font-style: italic;")
+            layout.addWidget(warn)
+        
+        layout.addWidget(self._make_line())
         
         # Actions
         btn_fw = QPushButton("Show Firmware Code...")
         btn_fw.clicked.connect(parent_tab._show_firmware_dialog)
         layout.addWidget(btn_fw)
+
+        btn_calib = QPushButton("Calibrate Disk Estimate...")
+        btn_calib.clicked.connect(parent_tab._start_disk_calibration)
+        layout.addWidget(btn_calib)
+
+        btn_guide = QPushButton("Starter's Guide...")
+        btn_guide.clicked.connect(lambda: parent_tab.show_starter_guide(force=True))
+        layout.addWidget(btn_guide)
         
         btn_ports = QPushButton("Refresh Ports")
         btn_ports.clicked.connect(parent_tab._refresh_serial_ports)
@@ -359,15 +470,328 @@ class SettingsDialog(ThemedDialog):
         # Sync Layout checks
         self.check_mirror.setChecked(self.parent_tab._mirror_mode)
         self.check_wide.setChecked(self.parent_tab._wide_mode)
+        if hasattr(self, "check_diag"):
+            self.check_diag.blockSignals(True)
+            self.check_diag.setChecked(self.parent_tab._diagnostics_enabled)
+            self.check_diag.blockSignals(False)
+        if hasattr(self, "diag_interval"):
+            self.diag_interval.blockSignals(True)
+            self.diag_interval.setValue(int(self.parent_tab._diagnostics_interval_s))
+            self.diag_interval.blockSignals(False)
     
     def showEvent(self, event):
         self._sync_state()
         super().showEvent(event)
 
 
+class RunSummaryDialog(ThemedDialog):
+    def __init__(self, parent_tab, data: dict):
+        super().__init__(parent_tab, title="Run Pre-Flight Check")
+        self.parent_tab = parent_tab
+        self.setFixedSize(400, 520)
+        
+        layout = self.content_layout()
+
+        warnings = []
+        if not data.get("camera_ok", True):
+            warnings.append("NO CAMERA FEED")
+        if not data.get("serial_ok", True):
+            warnings.append("NO SERIAL CONNECTED")
+        if warnings:
+            warn = QLabel(" / ".join(warnings))
+            warn.setWordWrap(True)
+            warn.setAlignment(Qt.AlignCenter)
+            palette = active_theme()
+            danger = palette.get("DANGER", DANGER)
+            warn.setStyleSheet(f"color: {danger}; font-weight: 900; font-size: 12pt; padding: 6px;")
+            layout.addWidget(warn)
+        
+        # Grid for details
+        grid = QGridLayout()
+        grid.setSpacing(10)
+        
+        row = 0
+        def add_item(label, value):
+            nonlocal row
+            lbl = QLabel(f"<b>{label}</b>")
+            val = QLabel(str(value))
+            grid.addWidget(lbl, row, 0)
+            grid.addWidget(val, row, 1)
+            row += 1
+
+        add_item("Arm Name:", data.get("arm_name") or "—")
+        add_item("Camera:", f"Index {data.get('cam_index')} ({data.get('cam_res', 'Unknown')})")
+        add_item("Serial Port:", data.get('serial_port', 'Not Connected'))
+        add_item("Mode:", data.get('mode'))
+        add_item("Stepsize:", data.get('stepsize'))
+        add_item("Acclimation:", f"{data.get('acclimation_min')} min")
+        add_item("Warmup:", f"{data.get('warmup_sec')} s")
+        
+        duration = data.get('duration_min', 0)
+        duration_str = f"{duration} min" if duration > 0 else "Manual (Unlimited)"
+        add_item("Duration:", duration_str)
+        
+        layout.addLayout(grid)
+        
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(line)
+        
+        # Disk Estimation
+        est_label = QLabel(f"<b>Estimated Disk Usage:</b>")
+        est_source = data.get("est_source", "")
+        est_low = data.get("est_gb_low", 0.0)
+        est_high = data.get("est_gb_high", 0.0)
+        if est_source == "Manual":
+            est_val = QLabel("Manual run (no estimate)")
+        else:
+            est_val = QLabel(f"{est_low:.2f}–{est_high:.2f} GB ({est_source})")
+        est_val.setStyleSheet(f"color: {ACCENT}; font-size: 13pt; font-weight: bold;")
+        
+        layout.addWidget(est_label)
+        layout.addWidget(est_val)
+        
+        warning = QLabel(
+            "Note: Estimates are approximate. High-activity video may require more space."
+        )
+        warning.setWordWrap(True)
+        warning.setStyleSheet("font-size: 9pt; font-style: italic;")
+        layout.addWidget(warning)
+        
+        layout.addStretch(1)
+        
+        # Buttons
+        btn_layout = QHBoxLayout()
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.clicked.connect(self.reject)
+        
+        self.btn_start = QPushButton("Confirm & Start Run")
+        self.btn_start.setStyleSheet(f"background: {ACCENT}; color: white; font-weight: bold; padding: 8px;")
+        self.btn_start.clicked.connect(self.accept)
+
+        btn_layout.addWidget(self.btn_cancel)
+        btn_layout.addStretch(1)
+        btn_layout.addWidget(self.btn_start)
+        layout.addLayout(btn_layout)
+
+
+class UnsavedDataDialog(ThemedDialog):
+    def __init__(self, parent_tab, loggers: list):
+        super().__init__(parent_tab, title="⚠️ DISK FULL - DATA IN LIFE-RAFT")
+        self.parent_tab = parent_tab
+        self.loggers = loggers
+        self.setFixedSize(450, 300)
+        
+        layout = self.content_layout()
+        
+        msg = QLabel(
+            "The disk ran out of space during the run.\n\n"
+            "<b>Scientific CSV data is currently held in RAM.</b>\n"
+            "If you close the application now, this data will be LOST."
+        )
+        msg.setWordWrap(True)
+        msg.setStyleSheet("font-size: 11pt;")
+        layout.addWidget(msg)
+        
+        layout.addStretch(1)
+        
+        self.btn_retry = QPushButton("I've cleared space. RETRY SAVE.")
+        self.btn_retry.setStyleSheet(f"background: {ACCENT}; color: white; font-weight: bold; padding: 12px;")
+        self.btn_retry.clicked.connect(self._retry)
+        layout.addWidget(self.btn_retry)
+        
+        self.status_lbl = QLabel("")
+        self.status_lbl.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.status_lbl)
+
+    def _retry(self):
+        success = True
+        for logger in self.loggers:
+            if logger and hasattr(logger, "retry_flush"):
+                if not logger.retry_flush():
+                    success = False
+        
+        if success:
+            self.status_lbl.setText("Success! Data saved to disk.")
+            self.status_lbl.setStyleSheet("color: green;")
+            QTimer.singleShot(1500, self.accept)
+        else:
+            self.status_lbl.setText("Error: Still unable to write to disk.")
+            self.status_lbl.setStyleSheet(f"color: {DANGER};")
+
+
+class LowDiskDialog(ThemedDialog):
+    def __init__(self, parent_tab):
+        super().__init__(parent_tab, title="⚠️ DISK FULL - DATA BUFFERING IN RAM")
+        self.parent_tab = parent_tab
+        self.enable_low_disk = False
+        self.setFixedSize(470, 320)
+
+        layout = self.content_layout()
+
+        msg = QLabel(
+            "Disk writes are failing. CSV data is being held in RAM (life-raft).\n\n"
+            "Clear disk space to avoid data loss. You may optionally enable Low-Disk Mode "
+            "(log every other frame, ~15 FPS at 30 FPS input) to cut RAM growth ~50%."
+        )
+        msg.setWordWrap(True)
+        msg.setStyleSheet("font-size: 11pt;")
+        layout.addWidget(msg)
+
+        layout.addStretch(1)
+
+        btn_layout = QHBoxLayout()
+        self.btn_continue = QPushButton("Continue (full rate)")
+        self.btn_continue.clicked.connect(self.reject)
+
+        self.btn_low_disk = QPushButton("Enable Low-Disk Mode (15 FPS logging)")
+        self.btn_low_disk.setStyleSheet(f"background: {ACCENT}; color: white; font-weight: bold; padding: 10px;")
+        self.btn_low_disk.clicked.connect(self._enable)
+
+        btn_layout.addWidget(self.btn_continue)
+        btn_layout.addStretch(1)
+        btn_layout.addWidget(self.btn_low_disk)
+        layout.addLayout(btn_layout)
+
+    def _enable(self):
+        self.enable_low_disk = True
+        self.accept()
+
+
+class StarterGuideDialog(ThemedDialog):
+    def __init__(self, parent_tab):
+        super().__init__(parent_tab, title="NEMESIS Starter's Guide")
+        self.parent_tab = parent_tab
+        self.setFixedSize(520, 520)
+
+        layout = self.content_layout()
+        self.stack = QStackedWidget()
+        layout.addWidget(self.stack)
+
+        # Page 1: Welcome + Firmware + Arm Name
+        page1 = QWidget()
+        p1 = QVBoxLayout(page1)
+        p1.addWidget(QLabel("<b>Welcome!</b> Let's set up this arm."))
+        p1.addWidget(QLabel("1) Install firmware on the Arduino, then set an arm name."))
+        btn_fw = QPushButton("Show Firmware Code...")
+        btn_fw.clicked.connect(parent_tab._show_firmware_dialog)
+        p1.addWidget(btn_fw)
+        p1.addWidget(QLabel("Arm Name"))
+        self.arm_name = QLineEdit()
+        self.arm_name.setPlaceholderText("Arm Name (e.g. Arm A)")
+        self.arm_name.setText(parent_tab.arm_name_edit.text().strip())
+        self.arm_name.textChanged.connect(lambda t: parent_tab.arm_name_edit.setText(t))
+        p1.addWidget(self.arm_name)
+        p1.addStretch(1)
+        self.stack.addWidget(page1)
+
+        # Page 2: Disk calibration
+        page2 = QWidget()
+        p2 = QVBoxLayout(page2)
+        p2.addWidget(QLabel("<b>Disk Calibration</b>"))
+        p2.addWidget(QLabel("Measure your actual video bitrate and CSV sizes for more accurate estimates."))
+        self.calib_status = QLabel("")
+        self.calib_status.setWordWrap(True)
+        p2.addWidget(self.calib_status)
+        btn_calib = QPushButton("Run Disk Calibration")
+        btn_calib.clicked.connect(lambda: parent_tab._start_disk_calibration(report_to=self.calib_status))
+        p2.addWidget(btn_calib)
+        p2.addStretch(1)
+        self.stack.addWidget(page2)
+
+        # Page 3: Theme + Layout
+        page3 = QWidget()
+        p3 = QVBoxLayout(page3)
+        p3.addWidget(QLabel("<b>Theme & Layout</b>"))
+        theme_row = QHBoxLayout()
+        btn_light = QPushButton("Light")
+        btn_light.clicked.connect(lambda: parent_tab._apply_theme("light", force=True))
+        btn_dark = QPushButton("Dark")
+        btn_dark.clicked.connect(lambda: parent_tab._apply_theme("dark", force=True))
+        theme_row.addWidget(btn_light)
+        theme_row.addWidget(btn_dark)
+        p3.addLayout(theme_row)
+        mirror = QCheckBox("Mirror Layout")
+        mirror.setChecked(parent_tab._mirror_mode)
+        mirror.toggled.connect(parent_tab._set_mirror_mode)
+        p3.addWidget(mirror)
+        wide = QCheckBox("Wide Layout (Top/Bottom)")
+        wide.setChecked(parent_tab._wide_mode)
+        wide.toggled.connect(parent_tab._set_wide_mode)
+        p3.addWidget(wide)
+        p3.addStretch(1)
+        self.stack.addWidget(page3)
+
+        # Page 4: Diagnostics
+        page4 = QWidget()
+        p4 = QVBoxLayout(page4)
+        p4.addWidget(QLabel("<b>Diagnostics Mode</b>"))
+        p4.addWidget(QLabel(
+            "Enable optional diagnostics to record performance stats during long runs. "
+            "This writes a diagnostics.csv in the run folder for later analysis."
+        ))
+        diag_toggle = QCheckBox("Enable Diagnostics Mode")
+        diag_toggle.setChecked(parent_tab._diagnostics_enabled)
+        diag_toggle.toggled.connect(parent_tab._set_diagnostics_enabled)
+        p4.addWidget(diag_toggle)
+        p4.addStretch(1)
+        self.stack.addWidget(page4)
+
+        # Page 5: Finish
+        page5 = QWidget()
+        p5 = QVBoxLayout(page5)
+        p5.addWidget(QLabel("<b>All set.</b> You can reopen this guide from Settings any time."))
+        self.chk_done = QCheckBox("Don't show this again")
+        self.chk_done.setChecked(True)
+        p5.addWidget(self.chk_done)
+        p5.addStretch(1)
+        self.stack.addWidget(page5)
+
+        # Navigation
+        nav = QHBoxLayout()
+        self.btn_back = QPushButton("Back")
+        self.btn_back.clicked.connect(self._back)
+        self.btn_next = QPushButton("Next")
+        self.btn_next.clicked.connect(self._next)
+        self.btn_skip = QPushButton("Skip for now")
+        self.btn_skip.clicked.connect(self.reject)
+        nav.addWidget(self.btn_back)
+        nav.addStretch(1)
+        nav.addWidget(self.btn_skip)
+        nav.addWidget(self.btn_next)
+        layout.addLayout(nav)
+
+        self._sync_nav()
+
+    def _sync_nav(self):
+        idx = self.stack.currentIndex()
+        self.btn_back.setEnabled(idx > 0)
+        if idx >= self.stack.count() - 1:
+            self.btn_next.setText("Finish")
+        else:
+            self.btn_next.setText("Next")
+
+    def _back(self):
+        idx = max(0, self.stack.currentIndex() - 1)
+        self.stack.setCurrentIndex(idx)
+        self._sync_nav()
+
+    def _next(self):
+        idx = self.stack.currentIndex()
+        if idx >= self.stack.count() - 1:
+            if self.chk_done.isChecked():
+                self.parent_tab._mark_starter_guide_complete()
+            self.accept()
+            return
+        self.stack.setCurrentIndex(idx + 1)
+        self._sync_nav()
+
+
 class RunTab(QWidget):
     runCompleted = Signal(str, str)
     themeChanged = Signal(str)
+    titleChanged = Signal(str)
 
     class StyledCombo(QComboBox):
         def __init__(self, popup_qss: str = "", *args, **kwargs):
@@ -999,6 +1423,11 @@ class RunTab(QWidget):
 
         # Top dense status line + inline logo
         header_row = QHBoxLayout()
+        self.arm_name_edit = QLineEdit()
+        self.arm_name_edit.setPlaceholderText("Arm Name (e.g. Arm A)")
+        self.arm_name_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.arm_name_edit.textChanged.connect(lambda t: self.titleChanged.emit(t if t.strip() else "Run Tab"))
+        
         self.statusline = QLabel("—")
         self.statusline.setObjectName("StatusLine")
         self.statusline.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -1148,7 +1577,7 @@ class RunTab(QWidget):
         self.chart_frame.setStyleSheet(
             f"background: {BG}; border: {CHART_FRAME_BORDER_PX}px solid {BORDER};"
         )
-        self.chart_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.chart_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         chart_layout = QVBoxLayout(self.chart_frame)
         chart_layout.setContentsMargins(0, 0, 0, 0)
         chart_layout.addWidget(self.live_chart.canvas)
@@ -1289,7 +1718,7 @@ class RunTab(QWidget):
         serial_status_row.addStretch(1)  # keep status text left-aligned
 
         # Layout
-        # Left pane: 16:9-bounded preview, then chart; keep both anchored to top
+        # Left pane: 16:9-bounded preview, then chart
         left = QVBoxLayout(); left.setContentsMargins(0, 0, 0, 0); left.setSpacing(SPACING_MD)
         self.video_area = AspectRatioContainer(
             self.video_view, PREVIEW_ASPECT_RATIO[0], PREVIEW_ASPECT_RATIO[1]
@@ -1298,9 +1727,12 @@ class RunTab(QWidget):
             self.video_area.setMinimumSize(*VIDEO_AREA_MIN_SIZE)
         except Exception:
             pass
-        left.addWidget(self.video_area, 0, Qt.AlignTop)
-        left.addWidget(self.chart_frame, 0, Qt.AlignTop)
-        left.addStretch(1)
+        sp_video = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        sp_video.setHeightForWidth(True)
+        self.video_area.setSizePolicy(sp_video)
+        self.chart_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        left.addWidget(self.video_area, 1)
+        left.addWidget(self.chart_frame, 1)
         # Top margin keeps controls clear of the window chrome
         right = QVBoxLayout()
         right.setContentsMargins(0, RIGHT_PANEL_TOP_MARGIN, 0, 0)
@@ -1355,6 +1787,7 @@ class RunTab(QWidget):
         self.lbl_stepsize = QLabel("Stepsize:")
         self.lbl_replicant = QLabel("Replicant:")
         self.lbl_warmup = QLabel("Warmup:")
+        self.lbl_acclimation = QLabel("Acclimation:")
         self.lbl_autostop = QLabel("Stop after (min):")
         lfm = self.lbl_mode.fontMetrics()
         label_w = max(
@@ -1364,9 +1797,10 @@ class RunTab(QWidget):
             lfm.horizontalAdvance("Stepsize:"),
             lfm.horizontalAdvance("Replicant:"),
             lfm.horizontalAdvance("Warmup:"),
+            lfm.horizontalAdvance("Acclimation:"),
             lfm.horizontalAdvance("Stop after (min):")
         ) + LABEL_WIDTH_PADDING_PX
-        for lbl in (self.lbl_mode, self.lbl_period, self.lbl_lambda, self.lbl_stepsize, self.lbl_replicant, self.lbl_warmup, self.lbl_autostop):
+        for lbl in (self.lbl_mode, self.lbl_period, self.lbl_lambda, self.lbl_stepsize, self.lbl_replicant, self.lbl_warmup, self.lbl_acclimation, self.lbl_autostop):
             lbl.setFixedWidth(label_w)
         controls_grid = QGridLayout()
         controls_grid.setContentsMargins(0, 0, 0, 0)
@@ -1389,8 +1823,18 @@ class RunTab(QWidget):
         self.warmup_sec.setSpecialValueText("Off")
         self.warmup_sec.setFixedWidth(CONTROL_WIDTH)
         self.warmup_sec.setToolTip(
-            "Delay before the first host-run tap."
+            "Delay after recording starts but before the first tap fires."
         )
+
+        # Acclimation control
+        self.acclimation_min = QDoubleSpinBox()
+        self.acclimation_min.setRange(0.0, 1440.0) # Up to 24 hours
+        self.acclimation_min.setValue(0.0)
+        self.acclimation_min.setDecimals(1)
+        self.acclimation_min.setSuffix(" min")
+        self.acclimation_min.setSpecialValueText("Off")
+        self.acclimation_min.setFixedWidth(CONTROL_WIDTH)
+        self.acclimation_min.setToolTip("Initial settling period (no recording/stimuli) before the run officially starts.")
 
         # Auto-stop control
         self.auto_stop_min = QDoubleSpinBox()
@@ -1414,8 +1858,10 @@ class RunTab(QWidget):
         controls_grid.addWidget(self.stepsize, 4, 1, Qt.AlignRight)
         controls_grid.addWidget(self.lbl_warmup, 5, 0, Qt.AlignLeft)
         controls_grid.addWidget(self.warmup_sec, 5, 1, Qt.AlignRight)
-        controls_grid.addWidget(self.lbl_autostop, 6, 0, Qt.AlignLeft)
-        controls_grid.addWidget(self.auto_stop_min, 6, 1, Qt.AlignRight)
+        controls_grid.addWidget(self.lbl_acclimation, 6, 0, Qt.AlignLeft)
+        controls_grid.addWidget(self.acclimation_min, 6, 1, Qt.AlignRight)
+        controls_grid.addWidget(self.lbl_autostop, 7, 0, Qt.AlignLeft)
+        controls_grid.addWidget(self.auto_stop_min, 7, 1, Qt.AlignRight)
         controls_grid.setColumnStretch(1, 1)
         mode_section = QVBoxLayout()
         mode_section.setContentsMargins(0, 0, 0, 0)
@@ -1426,6 +1872,7 @@ class RunTab(QWidget):
 
         r4 = QHBoxLayout(); r4.addWidget(self.run_start_btn); r4.addWidget(self.run_stop_btn); r4.addWidget(self.clear_data_btn)
         r5 = QHBoxLayout(); r5.addWidget(QLabel("Output dir:")); r5.addWidget(self.outdir_edit,1); r5.addWidget(self.outdir_btn)
+        r5a = QHBoxLayout(); r5a.addWidget(QLabel("Arm name:")); r5a.addWidget(self.arm_name_edit, 1)
 
         # Config save/load row (was missing from layout)
         r5b = QHBoxLayout(); r5b.addWidget(self.save_cfg_btn); r5b.addWidget(self.load_cfg_btn)
@@ -1436,6 +1883,7 @@ class RunTab(QWidget):
         io_section.setSpacing(SPACING_SM)
         io_section.addLayout(r4)
         io_section.addLayout(r5)
+        io_section.addLayout(r5a)
         io_section.addLayout(r5b)
 
         # (chart moved under the video preview)
@@ -1606,6 +2054,35 @@ class RunTab(QWidget):
         self._zero_warmup_warning_shown = False
         self._auto_stop_pending_taps: int | None = None
         self._next_tap_delay_s: float | None = None
+        self._tracking_log_decimate = 1
+        self._tracking_log_counter = 0
+        self._low_disk_mode_active = False
+        self._low_disk_dialog_shown = False
+        self._disk_full_detected = False
+        self._disk_calib_active = False
+        self._disk_calib_recorder: video.VideoRecorder | None = None
+        self._disk_calib_start_ts = 0.0
+        self._disk_calib_path: Path | None = None
+        self._disk_calib_counts: list[int] = []
+        self._disk_calib_frames = 0
+        self._disk_calib_last_results = None
+        self._disk_calib_report_label: QLabel | None = None
+        self._diagnostics_enabled = False
+        self._diagnostics_interval_s = DIAG_SAMPLE_INTERVAL_S_DEFAULT
+        self._diagnostics_timer = QTimer(self)
+        self._diagnostics_timer.setInterval(int(self._diagnostics_interval_s * MS_PER_SEC))
+        self._diagnostics_timer.timeout.connect(self._sample_diagnostics)
+        self._diag_f = None
+        self._diag_w = None
+        self._diag_prev_ts: float | None = None
+        self._diag_prev_io = None
+        self._diag_process = psutil.Process() if psutil is not None else None
+        self._diag_preview_frames = 0
+        self._diag_cv_frames = 0
+        self._diag_prev_preview_frames = 0
+        self._diag_prev_cv_frames = 0
+        self._diag_prev_rec_frames = 0
+        self._diag_prev_drop_frames = 0
         self._auto_stop_timer = QTimer(self)
         self._auto_stop_timer.setSingleShot(True)
         self._auto_stop_timer.timeout.connect(self._on_auto_stop_due)
@@ -1616,6 +2093,12 @@ class RunTab(QWidget):
         self.serial_timer = QTimer(self)
         self.serial_timer.setInterval(SERIAL_TIMER_INTERVAL_MS)
         self.serial_timer.timeout.connect(self._drain_serial_queue)
+        
+        # Staged Start logic
+        self._acclimation_timer = QTimer(self)
+        self._acclimation_timer.setSingleShot(True)
+        self._acclimation_timer.timeout.connect(self._on_acclimation_finished)
+        self._acclimation_end_time: float | None = None
 
         # Signals
         self.cam_btn.clicked.connect(self._open_camera)
@@ -1635,9 +2118,9 @@ class RunTab(QWidget):
         self.save_cfg_btn.clicked.connect(self._save_config_clicked)
         self.load_cfg_btn.clicked.connect(self._load_config_clicked)
         self.pro_btn.clicked.connect(self._toggle_pro_mode)
-        self.period_sec.valueChanged.connect(lambda _v: self._update_status("Period updated."))
-        self.lambda_rpm.valueChanged.connect(lambda _v: self._update_status("Lambda updated."))
-        self.warmup_sec.valueChanged.connect(self._on_warmup_changed)
+        self.period_sec.editingFinished.connect(lambda: self._update_status("Period updated."))
+        self.lambda_rpm.editingFinished.connect(lambda: self._update_status("Lambda updated."))
+        self.warmup_sec.editingFinished.connect(self._on_warmup_changed)
         self.stepsize.currentTextChanged.connect(self._on_stepsize_changed)
         self.port_edit.editTextChanged.connect(self._on_port_text_changed)
 
@@ -1657,6 +2140,90 @@ class RunTab(QWidget):
         if self._active_calibration_path is None:
             self._active_calibration_path = self._calibration_paths[0]
         self._awaiting_replicant_timer = False
+        self._sleep_inhibitor: subprocess.Popen | None = None
+        
+        # Camera Heartbeat Watchdog
+        self._last_frame_ts: float | None = None
+        self._watchdog_timer = QTimer(self)
+        self._watchdog_timer.setInterval(2000) # Check every 2 seconds
+        self._watchdog_timer.timeout.connect(self._check_camera_heartbeat)
+        self._camera_dead = False
+
+    def _set_sleep_inhibition(self, active: bool):
+        if sys.platform != "darwin":
+            return
+        if active:
+            if self._sleep_inhibitor is None:
+                try:
+                    # 'caffeinate -i' prevents system idle sleep
+                    # -w <pid> ensures it dies if this process crashes
+                    self._sleep_inhibitor = subprocess.Popen(
+                        ["caffeinate", "-i", "-w", str(sys.getpid())],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
+                    APP_LOGGER.info("Sleep inhibition (caffeinate) activated.")
+                except Exception as e:
+                    APP_LOGGER.error(f"Failed to start caffeinate: {e}")
+        else:
+            if self._sleep_inhibitor is not None:
+                try:
+                    self._sleep_inhibitor.terminate()
+                    self._sleep_inhibitor.wait(timeout=1.0)
+                except Exception:
+                    pass
+                self._sleep_inhibitor = None
+                APP_LOGGER.info("Sleep inhibition deactivated.")
+
+    def show_starter_guide(self, *, force: bool = False):
+        if not force and not self._should_show_starter_guide():
+            return
+        dlg = StarterGuideDialog(self)
+        dlg.exec()
+
+    def _should_show_starter_guide(self) -> bool:
+        cfg = configio.load_config() or {}
+        guide = cfg.get("starter_guide", {})
+        if guide.get("completed") and guide.get("version") == STARTER_GUIDE_VERSION:
+            return False
+        return True
+
+    def _mark_starter_guide_complete(self):
+        cfg = configio.load_config() or {}
+        cfg["starter_guide"] = {
+            "completed": True,
+            "version": STARTER_GUIDE_VERSION,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        configio.save_config(cfg)
+
+    def _set_low_disk_mode(self, active: bool, *, reason: str = ""):
+        if active:
+            if self._low_disk_mode_active:
+                return
+            self._low_disk_mode_active = True
+            self._tracking_log_decimate = LOW_DISK_TRACKING_DECIMATE
+            self._tracking_log_counter = 0
+            self._update_status("Low-disk mode enabled: tracking logs every other frame (~15 FPS at 30 FPS input).")
+        else:
+            if not self._low_disk_mode_active:
+                return
+            self._low_disk_mode_active = False
+            self._tracking_log_decimate = 1
+            self._tracking_log_counter = 0
+            self._update_status("Low-disk mode disabled.")
+        if self.session.run_dir:
+            try:
+                self._update_run_metadata(
+                    Path(self.session.run_dir),
+                    {
+                        "low_disk_mode": bool(self._low_disk_mode_active),
+                        "tracking_log_decimate": int(self._tracking_log_decimate),
+                        "low_disk_reason": reason or "",
+                    },
+                )
+            except Exception:
+                pass
 
     def _build_logo_menu(self) -> QMenu:
         menu = QMenu(self)
@@ -2144,6 +2711,16 @@ class RunTab(QWidget):
 
     def _refresh_statusline(self):
         parts = []
+        if self._acclimation_end_time is not None:
+            remaining = max(0.0, self._acclimation_end_time - time.monotonic())
+            mins = int(remaining // 60)
+            secs = int(remaining % 60)
+            parts.append(f"ACCLIMATION: {mins:02d}:{secs:02d}")
+        if self._low_disk_mode_active:
+            parts.append(LOW_DISK_STATUS_LABEL)
+        elif self._disk_full_detected:
+            parts.append(DISK_FULL_STATUS_LABEL)
+            
         if self.cap is not None:
             idx = self.session.camera_index if self.session.camera_index is not None else "?"
             parts.append(f"Cam {idx}")
@@ -2165,6 +2742,8 @@ class RunTab(QWidget):
         except Exception:
             pass
 
+        self._check_disk_write_errors()
+
         if self.session.run_start is None:
             elapsed = self.session.last_run_elapsed
         else:
@@ -2184,8 +2763,555 @@ class RunTab(QWidget):
         except Exception:
             pass
 
+    def _check_disk_write_errors(self):
+        if not self._hardware_run_active:
+            return
+        for logger in (self.session.logger, self.session.tracking_logger):
+            if logger is None or not hasattr(logger, "consume_flush_error"):
+                continue
+            err, no_space = logger.consume_flush_error()
+            if err is None:
+                continue
+            if no_space:
+                if not self._disk_full_detected:
+                    self._disk_full_detected = True
+                    self._update_status("Disk full: buffering CSV data in RAM.")
+                if not self._low_disk_dialog_shown:
+                    self._low_disk_dialog_shown = True
+                    dlg = LowDiskDialog(self)
+                    if dlg.exec() and dlg.enable_low_disk:
+                        self._set_low_disk_mode(True, reason="disk_full")
+            else:
+                self._update_status(f"CSV write error: {err}")
+
+    def _set_diagnostics_enabled(self, enabled: bool):
+        self._diagnostics_enabled = bool(enabled)
+        cfg = configio.load_config() or {}
+        run_cfg = cfg.get("run", {})
+        run_cfg["diagnostics_enabled"] = self._diagnostics_enabled
+        run_cfg["diagnostics_interval_s"] = float(self._diagnostics_interval_s)
+        cfg["run"] = run_cfg
+        configio.save_config(cfg)
+        if self._diagnostics_enabled and self._hardware_run_active:
+            self._start_diagnostics_logging()
+        else:
+            self._stop_diagnostics_logging()
+        if self._hardware_run_active and self.session.run_dir:
+            try:
+                self._update_run_metadata(
+                    Path(self.session.run_dir),
+                    {
+                        "diagnostics_enabled": bool(self._diagnostics_enabled),
+                        "diagnostics_interval_s": float(self._diagnostics_interval_s),
+                    },
+                )
+            except Exception:
+                pass
+
+    def _set_diagnostics_interval(self, value: int):
+        interval = max(DIAG_SAMPLE_INTERVAL_MIN_S, min(DIAG_SAMPLE_INTERVAL_MAX_S, float(value)))
+        self._diagnostics_interval_s = interval
+        self._diagnostics_timer.setInterval(int(self._diagnostics_interval_s * MS_PER_SEC))
+        cfg = configio.load_config() or {}
+        run_cfg = cfg.get("run", {})
+        run_cfg["diagnostics_enabled"] = self._diagnostics_enabled
+        run_cfg["diagnostics_interval_s"] = float(self._diagnostics_interval_s)
+        cfg["run"] = run_cfg
+        configio.save_config(cfg)
+        if self._hardware_run_active and self.session.run_dir:
+            try:
+                self._update_run_metadata(
+                    Path(self.session.run_dir),
+                    {"diagnostics_interval_s": float(self._diagnostics_interval_s)},
+                )
+            except Exception:
+                pass
+
+    def _start_diagnostics_logging(self):
+        if not self._diagnostics_enabled or not self.session.run_dir:
+            return
+        if self._diag_w is not None:
+            return
+        try:
+            path = Path(self.session.run_dir) / DIAG_FILE_NAME
+            self._diag_f = open(path, "a", newline="", encoding="utf-8")
+            self._diag_w = csv.DictWriter(self._diag_f, fieldnames=DIAG_FIELDS)
+            if self._diag_f.tell() == 0:
+                self._diag_w.writeheader()
+        except Exception:
+            self._diag_f = None
+            self._diag_w = None
+            return
+        self._diag_prev_ts = time.monotonic()
+        self._diag_prev_preview_frames = self._diag_preview_frames
+        self._diag_prev_cv_frames = self._diag_cv_frames
+        if self.recorder:
+            self._diag_prev_rec_frames = self.recorder.total_frames
+            self._diag_prev_drop_frames = self.recorder.dropped_frames
+        else:
+            self._diag_prev_rec_frames = 0
+            self._diag_prev_drop_frames = 0
+        if psutil is not None and self._diag_process is not None:
+            try:
+                self._diag_process.cpu_percent(None)
+                psutil.cpu_percent(None)
+                self._diag_prev_io = psutil.disk_io_counters()
+            except Exception:
+                self._diag_prev_io = None
+        self._diagnostics_timer.start()
+
+    def _stop_diagnostics_logging(self):
+        self._diagnostics_timer.stop()
+        try:
+            if self._diag_f:
+                self._diag_f.flush()
+                self._diag_f.close()
+        except Exception:
+            pass
+        self._write_diagnostics_summary()
+        self._diag_f = None
+        self._diag_w = None
+        self._diag_prev_ts = None
+        self._diag_prev_io = None
+
+    def _sample_diagnostics(self):
+        if not self._hardware_run_active or self._diag_w is None or self._diag_f is None:
+            return
+        now = time.monotonic()
+        prev_ts = self._diag_prev_ts or now
+        dt = max(0.001, now - prev_ts)
+        self._diag_prev_ts = now
+
+        preview_delta = self._diag_preview_frames - self._diag_prev_preview_frames
+        self._diag_prev_preview_frames = self._diag_preview_frames
+        cv_delta = self._diag_cv_frames - self._diag_prev_cv_frames
+        self._diag_prev_cv_frames = self._diag_cv_frames
+        preview_fps = preview_delta / dt
+        cv_fps = cv_delta / dt
+
+        rec_fps = ""
+        rec_drop_fps = ""
+        rec_q = ""
+        rec_qmax = ""
+        if self.recorder:
+            total = self.recorder.total_frames
+            dropped = self.recorder.dropped_frames
+            rec_fps = (total - self._diag_prev_rec_frames) / dt
+            rec_drop_fps = (dropped - self._diag_prev_drop_frames) / dt
+            self._diag_prev_rec_frames = total
+            self._diag_prev_drop_frames = dropped
+            try:
+                rec_q = self.recorder.queue_size()
+                rec_qmax = self.recorder.queue_max()
+            except Exception:
+                rec_q = ""
+                rec_qmax = ""
+
+        run_elapsed = ""
+        if self.session.run_start is not None:
+            run_elapsed = max(0.0, time.monotonic() - self.session.run_start)
+
+        cpu_proc = ""
+        cpu_sys = ""
+        cpu_other = ""
+        mem_proc = ""
+        mem_sys = ""
+        load_1m = ""
+        threads = ""
+        disk_free_gb = ""
+        disk_write_mb_s = ""
+        metrics_source = "basic"
+        note = ""
+        if psutil is not None and self._diag_process is not None:
+            metrics_source = "psutil"
+            try:
+                cpu_proc = self._diag_process.cpu_percent(None)
+                cpu_sys = psutil.cpu_percent(None)
+                cpu_other = max(0.0, float(cpu_sys) - float(cpu_proc))
+            except Exception:
+                pass
+            try:
+                mem_proc = self._diag_process.memory_info().rss / 1_000_000.0
+                mem_sys = psutil.virtual_memory().percent
+            except Exception:
+                pass
+            try:
+                threads = self._diag_process.num_threads()
+            except Exception:
+                pass
+            try:
+                usage = psutil.disk_usage(str(Path(self.session.run_dir)))
+                disk_free_gb = usage.free / DISK_ESTIMATE_GB_DIVISOR
+            except Exception:
+                pass
+            try:
+                if self._diag_prev_io is not None:
+                    io_now = psutil.disk_io_counters()
+                    if io_now:
+                        delta = io_now.write_bytes - self._diag_prev_io.write_bytes
+                        disk_write_mb_s = (delta / dt) / 1_000_000.0
+                        self._diag_prev_io = io_now
+            except Exception:
+                pass
+        try:
+            load_1m = os.getloadavg()[0]
+        except Exception:
+            pass
+
+        row = {
+            "timestamp_iso": datetime.now(timezone.utc).isoformat(),
+            "t_host_s": f"{now:.3f}",
+            "arm_name": self.arm_name_edit.text().strip(),
+            "run_id": Path(self.session.run_dir).name if self.session.run_dir else "",
+            "run_elapsed_s": run_elapsed,
+            "camera_open": bool(self.cap is not None),
+            "camera_fps_est": f"{preview_fps:.2f}",
+            "cv_fps_est": f"{cv_fps:.2f}",
+            "rec_fps_est": f"{rec_fps:.2f}" if rec_fps != "" else "",
+            "rec_drop_fps": f"{rec_drop_fps:.2f}" if rec_drop_fps != "" else "",
+            "rec_queue_depth": rec_q,
+            "rec_queue_max": rec_qmax,
+            "serial_connected": bool(self.serial and self.serial.is_open()),
+            "camera_dead": bool(self._camera_dead),
+            "low_disk_mode": bool(self._low_disk_mode_active),
+            "tracking_decimate": int(self._tracking_log_decimate),
+            "cpu_process_pct": cpu_proc,
+            "cpu_system_pct": cpu_sys,
+            "cpu_other_pct": cpu_other,
+            "mem_process_mb": mem_proc,
+            "mem_system_pct": mem_sys,
+            "load_1m": load_1m,
+            "threads": threads,
+            "disk_free_gb": disk_free_gb,
+            "disk_write_mb_s": disk_write_mb_s,
+            "metrics_source": metrics_source,
+            "note": note,
+        }
+        try:
+            self._diag_w.writerow(row)
+            self._diag_f.flush()
+        except Exception:
+            pass
+
+    def _write_diagnostics_summary(self):
+        if not self.session.run_dir:
+            return
+        diag_path = Path(self.session.run_dir) / DIAG_FILE_NAME
+        if not diag_path.exists():
+            return
+        try:
+            rows = []
+            with diag_path.open("r", encoding="utf-8") as fh:
+                reader = csv.DictReader(fh)
+                for row in reader:
+                    rows.append(row)
+        except Exception:
+            return
+        if not rows:
+            return
+
+        def _to_float(val):
+            try:
+                return float(val)
+            except Exception:
+                return None
+
+        def _percentile(values, pct):
+            if not values:
+                return None
+            values = sorted(values)
+            if len(values) == 1:
+                return values[0]
+            k = (len(values) - 1) * (pct / 100.0)
+            f = int(k)
+            c = min(f + 1, len(values) - 1)
+            if f == c:
+                return values[f]
+            return values[f] + (values[c] - values[f]) * (k - f)
+
+        cpu_proc = [v for v in (_to_float(r.get("cpu_process_pct", "")) for r in rows) if v is not None]
+        cpu_sys = [v for v in (_to_float(r.get("cpu_system_pct", "")) for r in rows) if v is not None]
+        mem_proc = [v for v in (_to_float(r.get("mem_process_mb", "")) for r in rows) if v is not None]
+        mem_sys = [v for v in (_to_float(r.get("mem_system_pct", "")) for r in rows) if v is not None]
+        disk_free = [v for v in (_to_float(r.get("disk_free_gb", "")) for r in rows) if v is not None]
+        cam_fps = [v for v in (_to_float(r.get("camera_fps_est", "")) for r in rows) if v is not None]
+        cv_fps = [v for v in (_to_float(r.get("cv_fps_est", "")) for r in rows) if v is not None]
+        rec_fps = [v for v in (_to_float(r.get("rec_fps_est", "")) for r in rows) if v is not None]
+        rec_drop = [v for v in (_to_float(r.get("rec_drop_fps", "")) for r in rows) if v is not None]
+        disk_write = [v for v in (_to_float(r.get("disk_write_mb_s", "")) for r in rows) if v is not None]
+
+        summary = {
+            "arm_name": rows[-1].get("arm_name", ""),
+            "run_id": rows[-1].get("run_id", ""),
+            "samples": len(rows),
+            "interval_s": self._diagnostics_interval_s,
+            "cpu_process_pct_avg": (sum(cpu_proc) / len(cpu_proc)) if cpu_proc else None,
+            "cpu_process_pct_p95": _percentile(cpu_proc, 95),
+            "cpu_system_pct_avg": (sum(cpu_sys) / len(cpu_sys)) if cpu_sys else None,
+            "cpu_system_pct_p95": _percentile(cpu_sys, 95),
+            "mem_process_mb_avg": (sum(mem_proc) / len(mem_proc)) if mem_proc else None,
+            "mem_process_mb_max": max(mem_proc) if mem_proc else None,
+            "mem_system_pct_avg": (sum(mem_sys) / len(mem_sys)) if mem_sys else None,
+            "mem_system_pct_p95": _percentile(mem_sys, 95),
+            "disk_free_gb_min": min(disk_free) if disk_free else None,
+            "disk_write_mb_s_avg": (sum(disk_write) / len(disk_write)) if disk_write else None,
+            "camera_fps_avg": (sum(cam_fps) / len(cam_fps)) if cam_fps else None,
+            "camera_fps_p05": _percentile(cam_fps, 5),
+            "cv_fps_avg": (sum(cv_fps) / len(cv_fps)) if cv_fps else None,
+            "cv_fps_p05": _percentile(cv_fps, 5),
+            "rec_fps_avg": (sum(rec_fps) / len(rec_fps)) if rec_fps else None,
+            "rec_drop_fps_avg": (sum(rec_drop) / len(rec_drop)) if rec_drop else None,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            out_path = Path(self.session.run_dir) / "diagnostics_summary.json"
+            with out_path.open("w", encoding="utf-8") as fh:
+                json.dump(summary, fh, indent=2)
+        except Exception:
+            pass
+
+    def _csv_row_bytes(self, fieldnames: list[str], row: dict) -> int:
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=fieldnames)
+        writer.writerow(row)
+        return len(buf.getvalue().encode("utf-8"))
+
+    def _estimate_tracking_row_bytes(self, results) -> int:
+        if results:
+            s = results[0]
+            row = {
+                "frame_idx": 0,
+                "timestamp": f"{0.0:.{TRACKING_TS_PRECISION}f}",
+                "stentor_id": s.id,
+                "state": s.state,
+                "circularity": f"{s.circularity:.{CIRCULARITY_PRECISION}f}",
+                "x": f"{s.centroid[0]:.{CENTROID_PRECISION}f}",
+                "y": f"{s.centroid[1]:.{CENTROID_PRECISION}f}",
+                "area": int(s.area),
+                "edge_reflection": "1" if getattr(s, "edge_reflection", False) else "0",
+            }
+        else:
+            row = {
+                "frame_idx": 0,
+                "timestamp": f"{0.0:.{TRACKING_TS_PRECISION}f}",
+                "stentor_id": "",
+                "state": "NONE",
+                "circularity": "",
+                "x": "",
+                "y": "",
+                "area": "",
+                "edge_reflection": "0",
+            }
+        return self._csv_row_bytes(TRACKING_FIELDS, row)
+
+    def _estimate_frame_row_bytes(self) -> int:
+        row = {
+            "frame_idx": 0,
+            "timestamp": f"{0.0:.{FRAME_TS_PRECISION}f}",
+        }
+        return self._csv_row_bytes(FRAME_FIELDS, row)
+
+    def _estimate_tap_row_bytes(self) -> int:
+        row = {
+            "run_id": "run_YYYYMMDD_HHMMSS",
+            "tap_id": 1,
+            "tap_uuid": "00000000000000000000000000000000",
+            "t_host_ms": 0,
+            "t_host_iso": "",
+            "t_fw_ms": "",
+            "mode": "Periodic",
+            "stepsize": 4,
+            "mark": "scheduled",
+            "notes": "",
+            "frame_preview_idx": 0,
+            "frame_recorded_idx": 0,
+            "recording_path": "",
+        }
+        return self._csv_row_bytes(CSV_FIELDS, row)
+
+    def _estimate_disk_usage(self, duration_min: float) -> tuple[float, float, str, str]:
+        if duration_min <= 0:
+            return 0.0, 0.0, "Manual", ""
+        duration_s = duration_min * SECONDS_PER_MIN
+        cfg = configio.load_config() or {}
+        calib = cfg.get("disk_calibration") or {}
+
+        if calib.get("video_bytes_per_sec"):
+            bytes_per_sec = float(calib["video_bytes_per_sec"])
+            src = "Calibrated"
+            note = calib.get("note", "")
+            if self.cap:
+                try:
+                    w, h = self.cap.get_size()
+                    cw, ch = calib.get("frame_size", [w, h])
+                    if cw and ch and w and h:
+                        bytes_per_sec *= (w * h) / float(cw * ch)
+                except Exception:
+                    pass
+            fps_est = float(calib.get("fps_est") or (self.cap.get_fps() if self.cap else self.preview_fps) or self.preview_fps)
+            avg_rows_per_frame = float(calib.get("avg_rows_per_frame") or 1.0)
+            tracking_row_bytes = float(calib.get("tracking_row_bytes") or 0.0)
+            frame_row_bytes = float(calib.get("frame_row_bytes") or 0.0)
+            tap_row_bytes = float(calib.get("tap_row_bytes") or 0.0)
+            video_bytes = bytes_per_sec * duration_s
+            tracking_bytes = fps_est * avg_rows_per_frame * tracking_row_bytes * duration_s
+            frame_bytes = fps_est * frame_row_bytes * duration_s
+            tap_rate = 0.0
+            mode_label = self.mode.currentText().strip()
+            if mode_label.lower() == "periodic":
+                period = max(0.001, float(self.period_sec.value()))
+                tap_rate = 1.0 / period
+            elif mode_label.lower() == "poisson":
+                tap_rate = float(self.lambda_rpm.value()) / 60.0
+            taps_bytes = tap_rate * tap_row_bytes * duration_s
+            total_bytes = video_bytes + tracking_bytes + frame_bytes + taps_bytes
+            low_gb = total_bytes / DISK_ESTIMATE_GB_DIVISOR
+            high_gb = low_gb * DISK_ESTIMATE_MARGIN
+            return low_gb, high_gb, src, note
+
+        # Fallback heuristic
+        est_gb = (duration_min / 60.0) * 1.5
+        if self.cap:
+            w, h = self.cap.get_size()
+            if w > 0 and h > 0:
+                est_gb *= (w * h) / (1280 * 720)
+        est_gb *= 1.2
+        return est_gb, est_gb * DISK_ESTIMATE_MARGIN, "Heuristic", ""
+
+    def _start_disk_calibration(self, *, report_to: QLabel | None = None):
+        if self._disk_calib_active:
+            return
+        if self._hardware_run_active or self._acclimation_end_time is not None:
+            self._update_status("Stop the run before disk calibration.")
+            return
+        if self.cap is None:
+            QMessageBox.warning(self, "Disk Calibration", "Open the camera first.")
+            return
+        if self._frame_worker is None:
+            QMessageBox.warning(self, "Disk Calibration", "Start the camera preview first.")
+            return
+
+        base_dir = RUNS_DIR / "_calibration"
+        try:
+            base_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        fname = f"disk_calib_{time.strftime('%Y%m%d_%H%M%S')}.mp4"
+        path = base_dir / fname
+        fps = self.cap.get_fps() or self.preview_fps
+        size = self.cap.get_size()
+        try:
+            recorder = video.VideoRecorder(str(path), fps=fps, frame_size=size)
+        except Exception as exc:
+            QMessageBox.warning(self, "Disk Calibration", f"Failed to start recorder: {exc}")
+            return
+        if not recorder.is_open():
+            QMessageBox.warning(self, "Disk Calibration", "Failed to start recorder.")
+            return
+
+        self._disk_calib_active = True
+        self._disk_calib_recorder = recorder
+        self._disk_calib_start_ts = time.monotonic()
+        self._disk_calib_path = path
+        self._disk_calib_counts = []
+        self._disk_calib_frames = 0
+        self._disk_calib_last_results = None
+        self._disk_calib_report_label = report_to
+        self._update_status(f"Disk calibration recording ({DISK_CALIBRATION_DURATION_S:.0f}s)...")
+        if report_to is not None:
+            report_to.setText("Calibration running...")
+
+    def _finish_disk_calibration(self):
+        if not self._disk_calib_active:
+            return
+        self._disk_calib_active = False
+        recorder = self._disk_calib_recorder
+        path = self._disk_calib_path
+        start_ts = self._disk_calib_start_ts
+        report_to = self._disk_calib_report_label
+        self._disk_calib_recorder = None
+        self._disk_calib_path = None
+        self._disk_calib_report_label = None
+
+        try:
+            if recorder:
+                recorder.close()
+        except Exception:
+            pass
+
+        elapsed = max(0.1, time.monotonic() - start_ts)
+        if not path or not path.exists():
+            self._update_status("Disk calibration failed.")
+            return
+        try:
+            size_bytes = path.stat().st_size
+        except Exception:
+            size_bytes = 0
+
+        fps_est = self._disk_calib_frames / elapsed if elapsed > 0 else 0.0
+        if fps_est <= 0:
+            fps_est = self.cap.get_fps() or self.preview_fps
+        avg_rows_per_frame = 1.0
+        if self._disk_calib_counts:
+            avg_rows_per_frame = sum(self._disk_calib_counts) / float(len(self._disk_calib_counts))
+            avg_rows_per_frame = max(1.0, avg_rows_per_frame)
+
+        tracking_row_bytes = self._estimate_tracking_row_bytes(self._disk_calib_last_results)
+        frame_row_bytes = self._estimate_frame_row_bytes()
+        tap_row_bytes = self._estimate_tap_row_bytes()
+        video_bps = size_bytes / elapsed if elapsed > 0 else 0.0
+        if video_bps <= 0.0:
+            self._update_status("Disk calibration failed: sample size 0.")
+            return
+
+        cfg = configio.load_config() or {}
+        cfg["disk_calibration"] = {
+            "video_bytes_per_sec": video_bps,
+            "fps_est": fps_est,
+            "frame_size": list(self.cap.get_size() if self.cap else (0, 0)),
+            "avg_rows_per_frame": avg_rows_per_frame,
+            "tracking_row_bytes": tracking_row_bytes,
+            "frame_row_bytes": frame_row_bytes,
+            "tap_row_bytes": tap_row_bytes,
+            "sample_sec": elapsed,
+            "sample_bytes": size_bytes,
+            "measured_at": datetime.now(timezone.utc).isoformat(),
+            "note": "Calibrated from a short recording sample.",
+        }
+        configio.save_config(cfg)
+
+        try:
+            path.unlink()
+        except Exception:
+            pass
+
+        gb_per_hr = (video_bps * 3600.0) / DISK_ESTIMATE_GB_DIVISOR
+        msg = f"Calibration complete. Video rate ~{gb_per_hr:.2f} GB/hr."
+        self._update_status(msg)
+        if report_to is not None:
+            report_to.setText(msg)
+        else:
+            QMessageBox.information(self, "Disk Calibration", msg)
+
+    def _cancel_disk_calibration(self):
+        if not self._disk_calib_active:
+            return
+        self._disk_calib_active = False
+        try:
+            if self._disk_calib_recorder:
+                self._disk_calib_recorder.close()
+        except Exception:
+            pass
+        self._disk_calib_recorder = None
+        self._disk_calib_path = None
+        if self._disk_calib_report_label is not None:
+            self._disk_calib_report_label.setText("Calibration cancelled.")
+        self._disk_calib_report_label = None
+        self._update_status("Disk calibration cancelled.")
+
     def _init_run_lock_controls(self):
         self._run_lock_controls = [
+            self.arm_name_edit,
             self.port_edit,
             self.serial_btn,
             self.enable_btn,
@@ -2205,6 +3331,7 @@ class RunTab(QWidget):
             self.lambda_rpm,
             self.stepsize,
             self.warmup_sec,
+            self.acclimation_min,
             self.auto_stop_min,
             self.replicant_load_btn,
             self.replicant_clear_btn,
@@ -2279,7 +3406,9 @@ class RunTab(QWidget):
         if self.serial and self.serial.is_open():
             self._send_serial_char(str(step), f"Stepsize {step}")
 
-    def _on_warmup_changed(self, value: float):
+    def _on_warmup_changed(self, value: float | None = None):
+        if value is None:
+            value = self.warmup_sec.value()
         warmup = max(0.0, float(value))
         if warmup <= 0.0:
             if not self._zero_warmup_warning_shown:
@@ -2304,6 +3433,10 @@ class RunTab(QWidget):
                 "lambda_rpm": float(self.lambda_rpm.value()),
                 "stepsize": self._selected_stepsize(),
                 "warmup_sec": float(self.warmup_sec.value()),
+                "acclimation_min": float(self.acclimation_min.value()),
+                "arm_name": self.arm_name_edit.text().strip(),
+                "diagnostics_enabled": bool(self._diagnostics_enabled),
+                "diagnostics_interval_s": float(self._diagnostics_interval_s),
                 "output_dir": self.outdir_edit.text().strip(),
                 "camera_index": int(self.cam_index.value()),
                 "serial_port": self.port_edit.currentText().strip(),
@@ -2343,6 +3476,12 @@ class RunTab(QWidget):
                 self.warmup_sec.setValue(float(run_cfg["warmup_sec"]))
             finally:
                 self.warmup_sec.blockSignals(False)
+        if "acclimation_min" in run_cfg:
+            try:
+                self.acclimation_min.blockSignals(True)
+                self.acclimation_min.setValue(float(run_cfg["acclimation_min"]))
+            finally:
+                self.acclimation_min.blockSignals(False)
         if "output_dir" in run_cfg and run_cfg["output_dir"]:
             self.outdir_edit.setText(run_cfg["output_dir"])
         if "camera_index" in run_cfg:
@@ -2350,6 +3489,20 @@ class RunTab(QWidget):
         if "serial_port" in run_cfg and run_cfg["serial_port"]:
             self.port_edit.setCurrentText(run_cfg["serial_port"])
             self._active_serial_port = run_cfg["serial_port"]
+        if "arm_name" in run_cfg:
+            self.arm_name_edit.setText(str(run_cfg["arm_name"]))
+        elif "rig_name" in run_cfg:
+            self.arm_name_edit.setText(str(run_cfg["rig_name"]))
+        if "diagnostics_interval_s" in run_cfg:
+            try:
+                self._set_diagnostics_interval(float(run_cfg["diagnostics_interval_s"]))
+            except Exception:
+                pass
+        if "diagnostics_enabled" in run_cfg:
+            try:
+                self._set_diagnostics_enabled(bool(run_cfg["diagnostics_enabled"]))
+            except Exception:
+                pass
         if "auto_rec" in run_cfg:
             self.auto_rec_check.setChecked(bool(run_cfg["auto_rec"]))
         if "show_cv" in run_cfg:
@@ -2462,6 +3615,7 @@ class RunTab(QWidget):
             "started_at": datetime.now(timezone.utc).isoformat(),
             "run_start_host_ms": int(round(self.session.run_start * MS_PER_SEC)) if self.session.run_start else None,
             "app_version": APP_VERSION,
+            "arm_name": self.arm_name_edit.text().strip(),
             "serial_port": self._active_serial_port or self.port_edit.currentText().strip(),
             "camera_index": self.session.camera_index,
             "camera_fps": camera_fps,
@@ -2472,6 +3626,12 @@ class RunTab(QWidget):
             "lambda_rpm": float(self.lambda_rpm.value()) if mode == "Poisson" else None,
             "stepsize": self._selected_stepsize() or self.current_stepsize,
             "warmup_sec": float(self.warmup_sec.value()),
+            "acclimation_min": float(self.acclimation_min.value()),
+            "low_disk_mode": bool(self._low_disk_mode_active),
+            "tracking_log_decimate": int(self._tracking_log_decimate),
+            "low_disk_reason": "",
+            "diagnostics_enabled": bool(self._diagnostics_enabled),
+            "diagnostics_interval_s": float(self._diagnostics_interval_s),
             "recording_path": self.recorder.path if self.recorder else "",
             "hardware_controlled": bool(hardware_controlled),
             "cv_config": cv_cfg,
@@ -2623,8 +3783,74 @@ class RunTab(QWidget):
         return True
 
     def _start_run(self, *, hardware_controlled: bool = False):
-        if self._hardware_run_active:
+        if self._hardware_run_active or self._acclimation_end_time is not None:
             return
+        self._tracking_log_decimate = 1
+        self._tracking_log_counter = 0
+        self._low_disk_mode_active = False
+        self._low_disk_dialog_shown = False
+        self._disk_full_detected = False
+        self._diag_preview_frames = 0
+        self._diag_cv_frames = 0
+        self._diag_prev_preview_frames = 0
+        self._diag_prev_cv_frames = 0
+        self._diag_prev_rec_frames = 0
+        self._diag_prev_drop_frames = 0
+            
+        # 1. Gather Data for Summary
+        acclimation_min = float(self.acclimation_min.value())
+        warmup_sec = float(self.warmup_sec.value())
+        duration_min = float(self.auto_stop_min.value())
+        
+        mode_text = self.mode.currentText()
+        if self.session.replicant_ready:
+            mode_text = "Replicant"
+            
+        est_low_gb, est_high_gb, est_source, est_note = self._estimate_disk_usage(duration_min)
+
+        if not hardware_controlled:
+            cam_ok = self.cap is not None
+            serial_ok = bool(self.serial and self.serial.is_open())
+            serial_label = self._active_serial_port or self.port_edit.currentText().strip()
+            if not serial_ok:
+                serial_label = serial_label or "Not Connected"
+            summary_data = {
+                "arm_name": self.arm_name_edit.text().strip(),
+                "cam_index": self.cam_index.value(),
+                "cam_res": f"{self.cap.get_size()[0]}x{self.cap.get_size()[1]}" if self.cap else "Closed",
+                "camera_ok": cam_ok,
+                "serial_ok": serial_ok,
+                "serial_port": serial_label,
+                "mode": mode_text,
+                "stepsize": self.stepsize.currentText(),
+                "acclimation_min": acclimation_min,
+                "warmup_sec": warmup_sec,
+                "duration_min": duration_min,
+                "est_gb_low": est_low_gb,
+                "est_gb_high": est_high_gb,
+                "est_source": est_source,
+                "est_note": est_note,
+            }
+            dlg = RunSummaryDialog(self, summary_data)
+            if not dlg.exec():
+                return
+
+        if not hardware_controlled and acclimation_min > 0:
+            acclimation_s = acclimation_min * SECONDS_PER_MIN
+            self._acclimation_end_time = time.monotonic() + acclimation_s
+            self._acclimation_timer.start(int(acclimation_s * MS_PER_SEC))
+            self._set_run_controls_locked(True)
+            self._set_sleep_inhibition(True)
+            self._update_status(f"Acclimation started. Run will begin in {acclimation_min:.1f} minutes.")
+            return
+
+        self._really_start_run(hardware_controlled=hardware_controlled)
+
+    def _on_acclimation_finished(self):
+        self._acclimation_end_time = None
+        self._really_start_run(hardware_controlled=False)
+
+    def _really_start_run(self, *, hardware_controlled: bool = False):
         base_dir = Path(self.outdir_edit.text().strip() or str(RUNS_DIR))
         run_dir, run_id = self._create_run_dir(base_dir)
         self.session.run_dir = str(run_dir)
@@ -2707,6 +3933,9 @@ class RunTab(QWidget):
         self._hardware_run_active = True
         self.session.hardware_run_active = True
         self._set_run_controls_locked(True)
+        self._set_sleep_inhibition(True)
+        if self._diagnostics_enabled:
+            self._start_diagnostics_logging()
 
         if not hardware_controlled:
             if self.session.replicant_running and self.session.replicant_delays:
@@ -2739,6 +3968,14 @@ class RunTab(QWidget):
         self._update_status(status_msg)
 
     def _stop_run(self, *, from_hardware: bool = False):
+        self._acclimation_timer.stop()
+        self._acclimation_end_time = None
+        self._set_sleep_inhibition(False)
+        if not self._hardware_run_active and not from_hardware:
+            self._set_run_controls_locked(False)
+            self._update_status("Acclimation cancelled.")
+            return
+
         if not self._hardware_run_active:
             return
         recording_path = self.recorder.path if self.recorder else ""
@@ -2750,6 +3987,28 @@ class RunTab(QWidget):
         self._hardware_run_active = False
         self.session.hardware_run_active = False
         self._set_run_controls_locked(False)
+        self._low_disk_mode_active = False
+        self._tracking_log_decimate = 1
+        self._low_disk_dialog_shown = False
+        self._disk_full_detected = False
+        self._stop_diagnostics_logging()
+        # Check for unsaved Life-Raft data
+        for logger in (self.session.logger, self.session.tracking_logger):
+            if logger and hasattr(logger, "retry_flush"):
+                try:
+                    logger.retry_flush()
+                except Exception:
+                    pass
+        loggers_with_data = []
+        if self.session.logger and getattr(self.session.logger, "has_unsaved_data", lambda: False)():
+            loggers_with_data.append(self.session.logger)
+        if self.session.tracking_logger and getattr(self.session.tracking_logger, "has_unsaved_data", lambda: False)():
+            loggers_with_data.append(self.session.tracking_logger)
+            
+        if loggers_with_data:
+            dlg = UnsavedDataDialog(self, loggers_with_data)
+            dlg.exec()
+
         if self.session.logger:
             try:
                 self.session.logger.close()
@@ -2954,6 +4213,7 @@ class RunTab(QWidget):
 
     def _open_camera(self):
         if self.cap is not None:
+            self._cancel_disk_calibration()
             try:
                 self._stop_frame_stream()
             except Exception:
@@ -3018,6 +4278,16 @@ class RunTab(QWidget):
         if self.cap is None or frame is None:
             return
         
+        self._last_frame_ts = time.monotonic()
+        self._diag_preview_frames += 1
+        if self._disk_calib_active and self._disk_calib_recorder is not None:
+            try:
+                self._disk_calib_recorder.write(frame)
+                self._disk_calib_frames += 1
+                if (time.monotonic() - self._disk_calib_start_ts) >= DISK_CALIBRATION_DURATION_S:
+                    self._finish_disk_calibration()
+            except Exception:
+                pass
         # Frame arrives as BGR from FrameWorker (Zero-Copy)
         bgr = frame 
         
@@ -3059,8 +4329,15 @@ class RunTab(QWidget):
     def _on_cv_results(self, results, frame_idx, timestamp, mask):
         self.session.cv_results = results
         self.session.cv_mask = mask
+        self._diag_cv_frames += 1
+        if self._disk_calib_active:
+            count = len(results) if results else 1
+            self._disk_calib_counts.append(count)
+            self._disk_calib_last_results = results
         if self.session.tracking_logger:
-            self.session.tracking_logger.log_frame(frame_idx, timestamp, results)
+            if self._tracking_log_decimate <= 1 or (self._tracking_log_counter % self._tracking_log_decimate == 0):
+                self.session.tracking_logger.log_frame(frame_idx, timestamp, results)
+            self._tracking_log_counter += 1
         try:
             current_ids = {res.id for res in results}
         except Exception:
@@ -3099,10 +4376,16 @@ class RunTab(QWidget):
         self._frame_worker.error.connect(self._update_status, Qt.QueuedConnection)
         self.cv_worker.error.connect(self._update_status, Qt.QueuedConnection)
         self._frame_worker.stopped.connect(self._on_frame_worker_stopped, Qt.QueuedConnection)
+        
+        self._last_frame_ts = time.monotonic()
+        self._camera_dead = False
+        self._watchdog_timer.start()
         self._frame_worker.start()
 
     @Slot()
     def _on_frame_worker_stopped(self):
+        self._watchdog_timer.stop()
+        self._camera_dead = False
         # Stop CV process when camera stops
         if self.cv_worker:
             self.cv_worker.stop_processing()
@@ -3125,6 +4408,31 @@ class RunTab(QWidget):
     def _on_port_text_changed(self, text: str):
         text = text.strip()
         self._active_serial_port = text
+
+    def _check_camera_heartbeat(self):
+        if self._last_frame_ts is None or self.cap is None:
+            return
+            
+        elapsed = time.monotonic() - self._last_frame_ts
+        if elapsed > 5.0: # 5 second threshold
+            self._camera_dead = True
+            self._update_status(f"⚠️ CAMERA TIMEOUT: No frames for {elapsed:.1f}s!")
+            # Visual alert: toggle status line color
+            palette = self._theme
+            danger = palette.get("DANGER", "#FF0000")
+            self.status.setStyleSheet(f"color: {danger}; font-weight: bold; font-size: 14pt;")
+            # Audible alert
+            try:
+                QApplication.beep()
+            except Exception:
+                pass
+        else:
+            if self._camera_dead:
+                self._camera_dead = False
+                # Restore style
+                text_color = self._theme.get("TEXT", "#000000")
+                self.status.setStyleSheet(f"color: {text_color}; font-weight: normal; font-size: 11pt;")
+                self._update_status("Camera recovered.")
 
     def shutdown(self):
         try:

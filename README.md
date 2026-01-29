@@ -9,7 +9,7 @@ NEMESIS is a specialized desktop application designed for automating habituation
 *   **Flexible Scheduling**: Supports both fixed-interval (Periodic) and variable-interval (Poisson) stimulus schedules.
 *   **High-Performance CV**: Performs real-time segmentation and tracking using a zero-copy multiprocessing engine, ensuring fluid UI performance even during heavy analysis.
 *   **Data Integrity**: Logs every stimulus event with synchronized host and firmware timestamps, anchored to specific video frames.
-*   **Multi-Rig Management**: Tabbed interface allows simultaneous control of multiple experimental rigs from a single workstation.
+*   **Multi-Arm Management**: Tabbed interface allows simultaneous control of multiple experimental arms from a single workstation.
 *   **Dashboard & Analysis**: Built-in tools to browse experiment history, visualize response rasters, and export data for downstream analysis.
 
 ## Installation

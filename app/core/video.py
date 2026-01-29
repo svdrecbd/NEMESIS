@@ -65,6 +65,7 @@ class VideoRecorder:
         
         # Buffer up to ~RECORDER_BUFFER_SECONDS seconds of video to absorb disk latency
         queue_max = max(1, int(round(self.fps * RECORDER_BUFFER_SECONDS)))
+        self._queue_max = queue_max
         self._queue = queue.Queue(maxsize=queue_max)
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._worker, daemon=True)
@@ -157,6 +158,15 @@ class VideoRecorder:
             self._queue.put_nowait(bgr_frame)
         except queue.Full:
             self.dropped_frames += 1 
+
+    def queue_size(self) -> int:
+        try:
+            return self._queue.qsize()
+        except Exception:
+            return 0
+
+    def queue_max(self) -> int:
+        return self._queue_max
 
     def close(self):
         self._stop_event.set()

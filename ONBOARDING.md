@@ -9,7 +9,7 @@ NEMESIS is built with **PySide6 (Qt)** and follows a modular design to support s
 
 ### Core Concepts
 
-*   **Tabbed Workspace**: The main window (`app/main.py`) manages a list of tabs. Each tab acts as an isolated sandbox for a specific experimental rig or data view.
+*   **Tabbed Workspace**: The main window (`app/main.py`) manages a list of tabs. Each tab acts as an isolated sandbox for a specific experimental arm or data view.
 *   **RunSession**: Encapsulates the state of a live experiment, including the camera connection, serial link, active loggers, and hardware workers. This isolation ensures that a hardware failure in one tab does not affect others.
 *   **Multiprocessing Engine**: To ensure a responsive UI on high-resolution displays, heavy computational tasks run in separate processes.
     *   **FrameWorker**: Runs in a thread, captures video frames, and writes them to a **Shared Memory Ring Buffer**.
@@ -75,9 +75,13 @@ A full frame index + timestamp timeline for aligning taps and CV outputs, used f
 ### 4. Metadata (`run.json`)
 A snapshot of the configuration parameters used to initiate the run, ensuring reproducibility.
 *   **schema_version**: Incremented when run metadata format changes.
+*   **arm_name**: Optional arm label shown in the UI and saved per run.
 *   **run_start_host_ms**: Monotonic start time used as the alignment baseline.
 *   **camera_fps / camera_frame_size / preview_fps**: Capture settings at run start.
+*   **acclimation_min**: Pre-run settling period (minutes) before acquisition starts.
 *   **cv_config**: CV thresholds and tracking parameters in effect during the run.
+*   **low_disk_mode / tracking_log_decimate**: Logging throttle state if Low-Disk Mode is enabled.
+*   **diagnostics_enabled / diagnostics_interval_s**: Health telemetry sampling settings (if diagnostics are enabled).
 
 ### ML Export Helper
 Use `tools/export_sequences.py` to build fixed-step sequences (HMM/LSTM-ready) from a run folder.

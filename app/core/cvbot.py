@@ -323,7 +323,7 @@ class StentorTracker:
         # Update Home Base (Running Average)
         # Stentor "anchor" doesn't move, but the centroid does (it swings).
         # Over time, the average centroid approximates the anchor + swing radius center.
-        # We update it slowly to account for slight rig shifts over weeks.
+        # We update it slowly to account for slight arm shifts over weeks.
         hx, hy = track['home_base']
         alpha = HOME_BASE_ALPHA  # Very slow update
         track['home_base'] = (hx * (1-alpha) + cx * alpha, hy * (1-alpha) + cy * alpha)

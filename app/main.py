@@ -3,7 +3,7 @@ import sys
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QTabWidget, QPushButton, QMenu, QStyleFactory, QTabBar, QToolButton
 )
-from PySide6.QtCore import Qt, Slot, QPoint, QObject
+from PySide6.QtCore import Qt, Slot, QPoint, QObject, QTimer
 from PySide6.QtGui import QIcon
 
 from app.core.paths import LOGO_PATH, FONT_PATH
@@ -130,6 +130,7 @@ class App(QWidget):
         self.tab_widget.addTab(run_tab, self._format_run_tab_title(self._run_tab_counter))
         self._run_tab_custom_names[run_tab] = None
         self._run_tab_counter += 1
+        QTimer.singleShot(200, run_tab.show_starter_guide)
 
         self._create_dashboard_tab(initial=True)
         self.tab_widget.setCurrentIndex(0)
@@ -236,9 +237,18 @@ class App(QWidget):
         except Exception:
             pass
         try:
+            tab.titleChanged.connect(lambda title, w=tab: self._on_tab_title_changed(w, title))
+        except Exception:
+            pass
+        try:
             tab.apply_theme_external(active_theme()["BG"]) # Simplification, logic handled in tab
         except Exception:
             pass
+
+    def _on_tab_title_changed(self, widget, title):
+        index = self.tab_widget.indexOf(widget)
+        if index != -1:
+            self.tab_widget.setTabText(index, title)
 
     @Slot(str, str)
     def _on_run_completed(self, run_id: str, run_path: str):
