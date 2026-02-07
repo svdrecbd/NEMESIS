@@ -61,4 +61,13 @@ app = BUNDLE(
     name='NEMESIS.app',
     icon='assets/images/transparent_logo.png',
     bundle_identifier='com.cellgeometry.nemesis',
-)
+        info_plist={
+            'NSCameraUsageDescription': 'NEMESIS requires camera access to track Stentor behavior.',
+            'NSMicrophoneUsageDescription': 'NEMESIS does not use the microphone, but some camera drivers require this permission.',
+            'NSBluetoothAlwaysUsageDescription': 'NEMESIS may require Bluetooth to connect to wireless cameras or serial devices.',
+            'NSBluetoothPeripheralUsageDescription': 'NEMESIS may require Bluetooth to connect to wireless cameras or serial devices.',
+            'CFBundleShortVersionString': '2.4.0',
+            'CFBundleVersion': '2.4.0'
+        },
+    )
+    

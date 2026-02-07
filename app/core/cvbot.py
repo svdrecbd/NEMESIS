@@ -6,6 +6,7 @@ from __future__ import annotations
 import multiprocessing
 import cv2
 import numpy as np
+import os  # Added for parent watchdog
 from collections import deque
 from typing import List, Dict, Tuple
 from dataclasses import dataclass
@@ -405,7 +406,13 @@ def run_cv_process(shm_name: str, shm_shape: Tuple[int, ...],
         shm = SharedMemoryManager(shm_name, shm_shape, create=False)
         mask_shm = SharedMemoryManager(mask_name, mask_shape, create=False)
         
+        parent_pid = os.getppid()
+
         while not stop_event.is_set():
+            # Watchdog: Exit if parent process dies (reparented to 1 or changed)
+            if os.getppid() != parent_pid:
+                break
+
             try:
                 # Get next frame task
                 # task: (frame_idx, timestamp, buf_idx)
