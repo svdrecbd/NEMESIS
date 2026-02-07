@@ -14,7 +14,10 @@ def get_resource_path(relative_path: str) -> Path:
 
 # Assets & Version
 BASE_DIR = get_resource_path(".")
-RUNS_DIR = (BASE_DIR / "runs").resolve()
+
+# Data Storage: Store in ~/Documents/NEMESIS to ensure persistence across app updates/reinstalls
+# This allows users to delete/replace the .app bundle without losing their experimental data.
+RUNS_DIR = (Path.home() / "Documents" / "NEMESIS" / "runs").resolve()
 RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
 ASSETS_DIR = get_resource_path("assets")

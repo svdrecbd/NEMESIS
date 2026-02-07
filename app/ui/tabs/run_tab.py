@@ -66,8 +66,8 @@ RIGHT_PANEL_MIN_WIDTH = 360
 RIGHT_SCROLL_MIN_WIDTH = 380
 RIGHT_PANEL_TOP_MARGIN = 32
 SPLITTER_HANDLE_WIDTH = 10
-SPLITTER_LEFT_RATIO = 0.75
-MIRROR_SPLITTER_FIXED_WIDTH = 380
+SPLITTER_LEFT_RATIO = 0.65
+MIRROR_SPLITTER_FIXED_WIDTH = 500
 MIRROR_SPLITTER_FILL = 100000
 PREVIEW_ASPECT_RATIO = (16, 9)
 THEME_TRANSITION_MS = 500
@@ -2754,9 +2754,17 @@ class RunTab(QWidget):
         overall = 0.0
         if elapsed > 0:
             overall = (self.session.taps / elapsed) * SECONDS_PER_MIN
+            
+        # Calculate instantaneous contraction percentage
+        current_results = getattr(self.session, "cv_results", None) or []
+        contracted_pct = 0.0
+        if current_results:
+            n_contracted = sum(1 for res in current_results if hasattr(res, 'state') and res.state == "CONTRACTED")
+            contracted_pct = (n_contracted / len(current_results)) * 100.0
+
         try:
             self.counters.setText(
-                f"Taps: {self.session.taps} | Contractions: {self._contraction_count} | "
+                f"Taps: {self.session.taps} | Contraction %: {contracted_pct:.1f}% | "
                 f"Elapsed: {elapsed:.1f} s | "
                 f"Rate10: {rate10_str} /min | Overall: {overall:.1f} /min"
             )
