@@ -24,10 +24,12 @@ app/
   core/
     analyzer.py            # Post-run data correlation
     cvbot.py               # Computer vision tracking logic (Process entry point)
+    ik_analysis.py         # Leighton-style I_k analysis pipeline
     logger.py              # CSV logging implementation
     paths.py               # Path resolution & constants
     plotter.py             # Matplotlib data-free plotting
     sequence_export.py     # ML sequence export utilities
+    stimulus_partition.py  # Frame-level baseline/post-tap partitioning
     runlib.py              # Run metadata management
     scheduler.py           # Stimulus timing logic
     session.py             # State container (RunSession)
@@ -46,6 +48,7 @@ app/
     theme.py               # Styling & Palette definitions
 assets/                    # Static assets (fonts, images)
 firmware/                  # Arduino source code
+tools/                     # CLI helpers (analysis/export/verification)
 tests/                     # Pytest suite
 ```
 
@@ -87,13 +90,33 @@ A snapshot of the configuration parameters used to initiate the run, ensuring re
 Use `tools/export_sequences.py` to build fixed-step sequences (HMM/LSTM-ready) from a run folder.
 See `docs/sample_sequence.csv` for the output shape.
 
+### I_k / Stimulus Partition Helpers
+Use these CLI tools for Leighton-style analysis:
+* `tools/export_stimulus_partitions.py`: Writes frame-level baseline/post-tap masks.
+* `tools/analyze_ik.py`: Produces `ik_by_k.csv`, `ik_qc.csv`, and `ik_analysis.json`.
+
+State handling in `ik_analysis.py`:
+* `CONTRACTED -> 1`
+* `EXTENDED -> 0`
+* `UNDETERMINED`, `NONE`, missing, and `edge_reflection=1` -> missing (`None`)
+
 ## Computer Vision System
 
 The `cvbot.py` module implements a lightweight tracking system designed for robust performance over days of operation.
 
 1.  **Segmentation**: Uses an adaptive threshold on the inverted Red channel to isolate the green Stentor against a white background.
-2.  **Tracking**: Implements a "Home Base" logic. Since Stentor are anchored, the tracker associates moving blobs with a fixed anchor point to maintain identity despite rapid shape changes.
+2.  **Tracking**: Implements a "Home Base" logic with spatially-gated candidate matching. Since Stentor are anchored, the tracker associates moving blobs with a fixed anchor point while reducing pairwise comparisons in sparse/high-count scenes.
 3.  **Classification**: Determines state based on circularity and the velocity of shape change (detecting rapid contractions).
+
+## Dashboard/Run Library Notes
+
+* Data tabs discover runs from:
+  * default `~/Documents/NEMESIS/runs`
+  * configured run output directory (if set)
+  * legacy/dev `runs/` paths
+* Deleting a run via Data tab removes:
+  * the run directory
+  * linked recording artifact(s) referenced by `recording_path` (including legacy `recording_*` folders when empty)
 
 ## Development Workflow
 

@@ -8,9 +8,11 @@ NEMESIS is a specialized desktop application designed for automating habituation
 *   **Integrated Control**: Drives Arduino-based mechanical tappers with adjustable force and microstepping.
 *   **Flexible Scheduling**: Supports both fixed-interval (Periodic) and variable-interval (Poisson) stimulus schedules.
 *   **High-Performance CV**: Performs real-time segmentation and tracking using a zero-copy multiprocessing engine, ensuring fluid UI performance even during heavy analysis.
+*   **Scalable Tracking**: Spatially-gated matching reduces unnecessary CV pair checks as organism count increases.
 *   **Data Integrity**: Logs every stimulus event with synchronized host and firmware timestamps, anchored to specific video frames.
 *   **Multi-Arm Management**: Tabbed interface allows simultaneous control of multiple experimental arms from a single workstation.
-*   **Dashboard & Analysis**: Built-in tools to browse experiment history, visualize response rasters, and export data for downstream analysis.
+*   **Dashboard & Analysis**: Built-in tools to browse experiment history, visualize response rasters/heatmaps, and export data for downstream analysis.
+*   **Leighton-Style I_k Pipeline**: Includes run-level information-theoretic analysis tooling for non-Markovian history dependence studies.
 
 ## Installation
 
@@ -85,6 +87,7 @@ Switch to a **Data Tab** (via the `+` button) to access the Dashboard.
 *   **Review**: Browse past runs and view summary statistics.
 *   **Visualize**: View raster plots of stimulus events and heatmaps of organism contraction responses.
 *   **Export**: Generate CSV files or raw logs for external analysis.
+*   **Delete**: Removing a run from the Data tab also removes linked recording artifacts referenced by that run.
 
 ### ML Export (HMM/LSTM)
 Each run folder includes `run.json`, `taps.csv`, `tracking.csv`, and `frames.csv` (full frame timeline).
@@ -104,6 +107,32 @@ frame timeline for alignment. Together, these make the dataset straightforward t
 and resample for sequence models (HMM/LSTM).
 
 Sample output: `docs/sample_sequence.csv`.
+
+### Leighton I_k Analysis Tools
+NEMESIS includes two offline analysis helpers for stimulus-conditioned history analysis:
+
+1. Export frame-level stimulus partitions:
+   ```bash
+   python tools/export_stimulus_partitions.py --run-dir <run_dir> --post-window-s 2.0
+   ```
+2. Run I_k analysis:
+   ```bash
+   python tools/analyze_ik.py --run-dir <run_dir>
+   ```
+
+Outputs include:
+* `ik_by_k.csv` (per-cell/per-condition/per-k rows)
+* `ik_qc.csv` (base inclusion/QC)
+* `ik_analysis.json` (run summary blocks)
+
+### Pipeline Verification Harness
+A synthetic end-to-end verification script is available:
+
+```bash
+python tools/verify_pipeline.py
+```
+
+It generates a simulated run and validates chart/analysis pipeline behavior in a controlled dataset.
 
 ## Known Issues (Preview)
 *   **Timing Drift**: Long-duration periodic runs (>24h) may experience slight clock drift between the host and firmware timing. The application saves calibration data to mitigate this in subsequent runs.
