@@ -2,20 +2,22 @@
 import json
 import csv
 import shutil
+import sys
 from pathlib import Path
 from typing import Optional
 
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, 
     QListWidget, QListWidgetItem, QAbstractItemView, QSizePolicy, 
-    QFrame, QComboBox, QMessageBox, QFileDialog
+    QFrame, QComboBox, QMessageBox, QFileDialog, QApplication
 )
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QColor, QDesktopServices
 
 from app.core.runlib import RunLibrary, RunSummary
 from app.core.analyzer import RunAnalyzer
-from app.core.paths import RUNS_DIR
+from app.core.paths import RUNS_DIR, BASE_DIR
+from app.core import configio
 from app.ui.widgets.chart import LiveChart
 from app.ui.theme import active_theme, BG, BORDER, TEXT, MID, ACCENT
 
@@ -38,7 +40,7 @@ class DashboardTab(QWidget):
         super().__init__()
         self.setObjectName("DashboardRoot")
         self.setAutoFillBackground(True)
-        self.library = RunLibrary(RUNS_DIR)
+        self.library = RunLibrary(self._discover_run_roots())
         self.current_summary: Optional[RunSummary] = None
         self.current_times: list[float] = []
 
@@ -160,6 +162,41 @@ class DashboardTab(QWidget):
 
     # Run list management
 
+    def _run_message_box(
+        self,
+        *,
+        title: str,
+        text: str,
+        icon: QMessageBox.Icon,
+        buttons: QMessageBox.StandardButton = QMessageBox.Ok,
+        default_button: QMessageBox.StandardButton | None = None,
+    ) -> QMessageBox.StandardButton:
+        parent = None
+        if sys.platform == "darwin":
+            # In the AppZoomView/QGraphicsProxyWidget stack, self.window() can resolve
+            # to a proxy host and produce an empty native shell window on macOS.
+            # Prefer active top-level window or no parent for clean modal behavior.
+            try:
+                parent = QApplication.activeWindow()
+            except Exception:
+                parent = None
+        else:
+            parent = self.window() or self
+
+        box = QMessageBox(parent)
+        if sys.platform == "darwin":
+            # Avoid native Cocoa sheet/focus glitches in tabbed workflow.
+            box.setOption(QMessageBox.Option.DontUseNativeDialog, True)
+            box.setWindowFlag(Qt.Sheet, False)
+            box.setWindowModality(Qt.ApplicationModal)
+        box.setIcon(icon)
+        box.setWindowTitle(title)
+        box.setText(text)
+        box.setStandardButtons(buttons)
+        if default_button is not None:
+            box.setDefaultButton(default_button)
+        return QMessageBox.StandardButton(box.exec())
+
     def _analyze_run(self):
         summary = self.current_summary
         if not summary:
@@ -173,15 +210,25 @@ class DashboardTab(QWidget):
         if results:
             self.info_label.setText(f"Analysis complete for {summary.run_id}.\n" 
                                     f"Processed {len(results['taps'])} taps.")
-            QMessageBox.information(self, "Analysis Complete", 
-                                    f"Successfully analyzed {len(results['taps'])} taps.\n"
-                                    f"Saved to {summary.path / 'analysis.json'}")
+            self._run_message_box(
+                title="Analysis Complete",
+                text=(
+                    f"Successfully analyzed {len(results['taps'])} taps.\n"
+                    f"Saved to {summary.path / 'analysis.json'}"
+                ),
+                icon=QMessageBox.Information,
+            )
             # Here we could reload the chart with the new data if we parse analysis.json
         else:
             self.info_label.setText("Analysis failed. Check logs.")
-            QMessageBox.warning(self, "Analysis Failed", "Could not analyze run. Ensure tracking.csv exists.")
+            self._run_message_box(
+                title="Analysis Failed",
+                text="Could not analyze run. Ensure tracking.csv exists.",
+                icon=QMessageBox.Warning,
+            )
 
     def refresh_runs(self, *_args, select_run: Optional[str] = None):
+        self.library = RunLibrary(self._discover_run_roots())
         current_target = select_run or (self.current_summary.run_id if self.current_summary else None)
         self.run_list.blockSignals(True)
         self.run_list.clear()
@@ -198,6 +245,36 @@ class DashboardTab(QWidget):
             self.run_list.setCurrentRow(target_row)
         else:
             self._set_current_summary(None)
+
+    def _discover_run_roots(self) -> list[Path]:
+        candidates: list[Path] = [RUNS_DIR]
+        cfg = configio.load_config() or {}
+        run_cfg = cfg.get("run") or {}
+        raw_outdir = str(run_cfg.get("output_dir") or "").strip()
+        if raw_outdir:
+            try:
+                candidates.append(Path(raw_outdir).expanduser())
+            except Exception:
+                pass
+
+        # Legacy/dev location used by older local runs.
+        candidates.append(BASE_DIR / "runs")
+
+        # If launched from repo root, include cwd/runs as an additional fallback.
+        candidates.append(Path.cwd() / "runs")
+
+        roots: list[Path] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            try:
+                key = str(candidate.expanduser().resolve())
+            except Exception:
+                key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            roots.append(Path(candidate).expanduser())
+        return roots
 
     def _on_run_selected(self):
         items = self.run_list.selectedItems()
@@ -375,7 +452,11 @@ class DashboardTab(QWidget):
     def _export_plot_image(self):
         summary = self.current_summary
         if summary is None:
-            QMessageBox.information(self, "Dashboard", "Select a run first.")
+            self._run_message_box(
+                title="Dashboard",
+                text="Select a run first.",
+                icon=QMessageBox.Information,
+            )
             return
         default_path = summary.path / f"{summary.run_id}_plot.png"
         dest, _ = QFileDialog.getSaveFileName(
@@ -389,16 +470,28 @@ class DashboardTab(QWidget):
         try:
             self.chart.save(dest)
         except Exception as exc:
-            QMessageBox.warning(self, "Export Plot", f"Failed to export plot: {exc}")
+            self._run_message_box(
+                title="Export Plot",
+                text=f"Failed to export plot: {exc}",
+                icon=QMessageBox.Warning,
+            )
             return
-        QMessageBox.information(self, "Export Plot", f"Plot exported → {dest}")
+        self._run_message_box(
+            title="Export Plot",
+            text=f"Plot exported → {dest}",
+            icon=QMessageBox.Information,
+        )
 
     # Actions
 
     def _open_run_folder(self):
         summaries = self._selected_summaries()
         if not summaries:
-            QMessageBox.information(self, "Dashboard", "Select a run first.")
+            self._run_message_box(
+                title="Dashboard",
+                text="Select a run first.",
+                icon=QMessageBox.Information,
+            )
             return
         target = summaries[0]
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(target.path.resolve())))
@@ -406,7 +499,11 @@ class DashboardTab(QWidget):
     def _export_run_csv(self):
         summaries = self._selected_summaries()
         if not summaries:
-            QMessageBox.information(self, "Dashboard", "Select at least one run to export.")
+            self._run_message_box(
+                title="Dashboard",
+                text="Select at least one run to export.",
+                icon=QMessageBox.Information,
+            )
             return
         if len(summaries) == 1:
             summary = summaries[0]
@@ -421,7 +518,11 @@ class DashboardTab(QWidget):
             try:
                 shutil.copy2(summary.path / "taps.csv", dest)
             except Exception as exc:
-                QMessageBox.warning(self, "Export", f"Failed to export CSV: {exc}")
+                self._run_message_box(
+                    title="Export",
+                    text=f"Failed to export CSV: {exc}",
+                    icon=QMessageBox.Warning,
+                )
             return
 
         dest_dir = QFileDialog.getExistingDirectory(self, "Choose export folder")
@@ -442,26 +543,38 @@ class DashboardTab(QWidget):
             except Exception as exc:
                 failures.append(f"{summary.run_id}: {exc}")
         if failures:
-            QMessageBox.warning(self, "Export", "Some exports failed:\n" + "\n".join(failures[:6]))
+            self._run_message_box(
+                title="Export",
+                text="Some exports failed:\n" + "\n".join(failures[:6]),
+                icon=QMessageBox.Warning,
+            )
         if exported:
-            QMessageBox.information(self, "Export", f"Exported {exported} CSV files to {export_root}")
+            self._run_message_box(
+                title="Export",
+                text=f"Exported {exported} CSV files to {export_root}",
+                icon=QMessageBox.Information,
+            )
 
     def _delete_run(self):
         summaries = self._selected_summaries()
         if not summaries:
-            QMessageBox.information(self, "Dashboard", "Select at least one run to delete.")
+            self._run_message_box(
+                title="Dashboard",
+                text="Select at least one run to delete.",
+                icon=QMessageBox.Information,
+            )
             return
         if len(summaries) == 1:
             summary = summaries[0]
             prompt = f"Delete run '{summary.run_id}'? This cannot be undone."
         else:
             prompt = f"Delete {len(summaries)} runs? This cannot be undone."
-        resp = QMessageBox.question(
-            self,
-            "Delete Run",
-            prompt,
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+        resp = self._run_message_box(
+            title="Delete Run",
+            text=prompt,
+            icon=QMessageBox.Warning,
+            buttons=QMessageBox.Yes | QMessageBox.No,
+            default_button=QMessageBox.No,
         )
         if resp != QMessageBox.Yes:
             return
@@ -469,12 +582,19 @@ class DashboardTab(QWidget):
         deleted = 0
         for summary in summaries:
             try:
-                shutil.rmtree(summary.path)
-                deleted += 1
+                ok = self.library.delete_run(summary.run_id, run_path=summary.path)
+                if ok:
+                    deleted += 1
+                else:
+                    failures.append(f"{summary.run_id}: delete failed")
             except Exception as exc:
                 failures.append(f"{summary.run_id}: {exc}")
         if failures:
-            QMessageBox.warning(self, "Delete", "Some deletions failed:\n" + "\n".join(failures[:6]))
+            self._run_message_box(
+                title="Delete",
+                text="Some deletions failed:\n" + "\n".join(failures[:6]),
+                icon=QMessageBox.Warning,
+            )
         if deleted:
             self.refresh_runs()
 

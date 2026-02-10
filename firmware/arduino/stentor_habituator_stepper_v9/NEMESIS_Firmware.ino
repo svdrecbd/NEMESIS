@@ -49,6 +49,11 @@ const float MIN_PERIOD_US_FLOAT = 1.0f;
 const float RANDOM_U_DENOM = 10000.0f;
 const long RANDOM_U_MIN = 1;
 const long RANDOM_U_MAX_EXCLUSIVE = 10001;
+const uint8_t ENTROPY_SAMPLE_COUNT = 64;
+const uint16_t ENTROPY_JITTER_MASK = 0x7;
+const uint32_t ENTROPY_LCG_A = 1664525UL;
+const uint32_t ENTROPY_LCG_C = 1013904223UL;
+const uint32_t ENTROPY_FALLBACK_SEED = 0x1D872B41UL;
 const unsigned long DEFAULT_PERIOD_US = 1000000UL;
 const double DEFAULT_PERIOD_US_FLOAT = 1000000.0;
 const unsigned long STEP_PULSE_DELAY_MS = 1;
@@ -62,6 +67,8 @@ bool motorEnabled = false;
 bool configuredModeIsRandom = false; // Remembers which mode to enter
 bool hostReplayMode = false;         // Host-driven replicant replay
 bool hostReplayActive = false;
+bool rngSeedLocked = false;
+unsigned long lastRandomSeed = 0;
 
 // State Tracking for Non-Blocking Debounce
 bool lastSwitchState = HIGH;
@@ -105,6 +112,9 @@ void printFormattedTime(unsigned long total_ms);
 void resetBEDPins();
 void printHelp();
 bool waitForSerialInput(unsigned long timeout_ms);
+uint32_t collectEntropySeed();
+void applyRandomSeed(unsigned long seed, bool lockSeed);
+void seedRngFromEntropy();
 
 // SETUP FUNCTION
 void setup() {
@@ -124,7 +134,7 @@ void setup() {
   lastSwitchDebounceTime = now;
   lastButtonDebounceTime = now;
 
-  randomSeed(analogRead(0));
+  seedRngFromEntropy();
 
   resetBEDPins();
   Serial.begin(SERIAL_BAUD);
@@ -252,6 +262,21 @@ void processHostConfig() {
   char *valueToken = cursor;
   while (*cursor && *cursor != ' ' && *cursor != ',' ) { cursor++; }
   *cursor = '\0';
+
+  if (modeChar == 'S') {
+    unsigned long parsedSeed = strtoul(stepToken, nullptr, 10);
+    if (parsedSeed == 0UL) {
+      seedRngFromEntropy();
+      Serial.println(F("CONFIG:OK,SEED=AUTO"));
+    } else {
+      applyRandomSeed(parsedSeed, true);
+      Serial.println(F("CONFIG:OK,SEED=FIXED"));
+    }
+    Serial.print(F("CONFIG:SEED_VALUE="));
+    Serial.println(lastRandomSeed);
+    Serial.println(F("CONFIG:DONE"));
+    return;
+  }
 
   int parsedStep = atoi(stepToken);
   if (parsedStep < MIN_STEPSIZE) parsedStep = MIN_STEPSIZE;
@@ -391,6 +416,9 @@ void checkTimedPulse() {
 void startTimedMode() {
   digitalWrite(PIN_GREEN_LED, HIGH);
   currentMode = configuredModeIsRandom ? Mode::Random : Mode::Periodic;
+  if (currentMode == Mode::Random && !rngSeedLocked) {
+    seedRngFromEntropy();
+  }
   Serial.println(F("--- TIMED MODE ACTIVATED ---"));
   Serial.println(F("Tapping..."));
   Serial.println(F("EVENT:MODE_ACTIVATED"));
@@ -642,10 +670,45 @@ void printHelp() {
     F("r. Raise the arm by a step."),
     F("l. Lower the arm by a step."),
     F("h. Print this help menu."),
-    F("\nUse the physical switch to start/stop the selected timed mode.\n")
+    F("\nUse the physical switch to start/stop the selected timed mode."),
+    F("Host seed override: send config 'S,<seed>,0' (seed=0 returns to auto entropy).\n")
   };
 
   for (auto msg : helpLines) {
     Serial.println(msg);
   }
+}
+
+uint32_t collectEntropySeed() {
+  uint32_t seed = 0xA5A5A5A5UL;
+  for (uint8_t i = 0; i < ENTROPY_SAMPLE_COUNT; i++) {
+    unsigned long t0 = micros();
+    int noise = analogRead(0);
+    unsigned long t1 = micros();
+    seed ^= (uint32_t)(noise & 0x03FFU) << (i % 16U);
+    seed ^= (uint32_t)t0;
+    seed = (seed * ENTROPY_LCG_A) + ENTROPY_LCG_C + (uint32_t)(t1 - t0);
+    delayMicroseconds((unsigned int)((t1 & ENTROPY_JITTER_MASK) + 1U));
+  }
+  seed ^= (uint32_t)micros();
+  seed ^= ((uint32_t)millis() << 16);
+  if (seed == 0UL) {
+    seed = ENTROPY_FALLBACK_SEED;
+  }
+  return seed;
+}
+
+void applyRandomSeed(unsigned long seed, bool lockSeed) {
+  if (seed == 0UL) {
+    seed = ENTROPY_FALLBACK_SEED;
+  }
+  randomSeed(seed);
+  lastRandomSeed = seed;
+  rngSeedLocked = lockSeed;
+}
+
+void seedRngFromEntropy() {
+  applyRandomSeed((unsigned long)collectEntropySeed(), false);
+  Serial.print(F("RNG:SEED,AUTO,"));
+  Serial.println(lastRandomSeed);
 }

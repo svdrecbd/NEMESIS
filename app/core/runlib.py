@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import json
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional, List
@@ -90,32 +91,114 @@ class RunSummary:
 class RunLibrary:
     """Simple helper for discovering saved runs."""
 
-    def __init__(self, base: Path):
-        self.base = base
+    def __init__(self, base: Path | str | Iterable[Path | str]):
+        if isinstance(base, (str, Path)):
+            bases = [Path(base)]
+        else:
+            bases = [Path(p) for p in base]
+        deduped: list[Path] = []
+        seen: set[str] = set()
+        for candidate in bases:
+            try:
+                key = str(candidate.resolve())
+            except Exception:
+                key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(candidate)
+        self.bases = deduped
 
     def list_runs(self) -> List[RunSummary]:
-        summaries: List[RunSummary] = []
-        for run_dir in iter_run_dirs(self.base):
-            try:
-                summaries.append(RunSummary.from_dir(run_dir))
-            except Exception as e:
-                APP_LOGGER.error(f"Failed to load run summary from {run_dir}: {e}")
-                continue
+        summaries_by_path: dict[str, RunSummary] = {}
+        for base in self.bases:
+            for run_dir in iter_run_dirs(base):
+                try:
+                    key = str(run_dir.resolve())
+                except Exception:
+                    key = str(run_dir)
+                if key in summaries_by_path:
+                    continue
+                try:
+                    summaries_by_path[key] = RunSummary.from_dir(run_dir)
+                except Exception as e:
+                    APP_LOGGER.error(f"Failed to load run summary from {run_dir}: {e}")
+                    continue
+        summaries = list(summaries_by_path.values())
+        summaries.sort(key=lambda s: s.path.name, reverse=True)
         return summaries
 
-    def delete_run(self, run_id: str) -> bool:
-        for run_dir in iter_run_dirs(self.base):
-            if run_dir.name == run_id or run_dir.name.endswith(run_id):
+    @staticmethod
+    def _resolve_recording_path(raw_path: str, run_dir: Path) -> Optional[Path]:
+        text = str(raw_path or "").strip()
+        if not text:
+            return None
+        try:
+            candidate = Path(text).expanduser()
+            if not candidate.is_absolute():
+                candidate = (run_dir / candidate)
+            return candidate.resolve()
+        except Exception:
+            try:
+                return Path(text).expanduser()
+            except Exception:
+                return None
+
+    @staticmethod
+    def _is_within(parent: Path, child: Path) -> bool:
+        try:
+            child.resolve().relative_to(parent.resolve())
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _delete_recording_artifact(recording_path: Path, run_dir: Path) -> None:
+        if not recording_path.exists():
+            return
+
+        # If recording lives in run_dir, deleting run_dir is sufficient.
+        if RunLibrary._is_within(run_dir, recording_path):
+            return
+
+        parent = recording_path.parent
+        if recording_path.is_file():
+            recording_path.unlink()
+        elif recording_path.is_dir():
+            shutil.rmtree(recording_path)
+            parent = recording_path.parent
+
+        # Clean up legacy recording_<timestamp> folder if it is now empty.
+        if (
+            parent.exists()
+            and parent.is_dir()
+            and parent != run_dir
+            and parent.name.startswith("recording_")
+        ):
+            try:
+                parent.rmdir()
+            except OSError:
+                pass
+
+    def delete_run(self, run_id: str, *, run_path: Optional[Path] = None) -> bool:
+        for summary in self.list_runs():
+            run_dir = summary.path
+            if run_path is not None:
                 try:
-                    for child in run_dir.glob("**/*"):
-                        if child.is_file():
-                            child.unlink()
-                    for child in sorted(run_dir.glob("**"), reverse=True):
-                        if child.is_dir():
-                            child.rmdir()
-                    run_dir.rmdir()
-                    return True
-                except Exception as e:
-                    APP_LOGGER.error(f"Failed to delete run directory {run_dir}: {e}")
-                    return False
+                    if run_dir.resolve() != Path(run_path).resolve():
+                        continue
+                except Exception:
+                    if run_dir != Path(run_path):
+                        continue
+            elif not (run_dir.name == run_id or run_dir.name.endswith(run_id) or summary.run_id == run_id):
+                continue
+            try:
+                rec_path = self._resolve_recording_path(summary.recording_path or "", run_dir)
+                if rec_path is not None:
+                    self._delete_recording_artifact(rec_path, run_dir)
+                shutil.rmtree(run_dir)
+                return True
+            except Exception as e:
+                APP_LOGGER.error(f"Failed to delete run directory {run_dir}: {e}")
+                return False
         return False

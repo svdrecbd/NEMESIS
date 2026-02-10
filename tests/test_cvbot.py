@@ -91,3 +91,43 @@ def test_state_classification_contracted_velocity():
     results, _ = tracker.process_frame(frame2, timestamp=1.2)
     
     assert results[0].state == "CONTRACTED"
+
+
+def test_tracking_dense_field_identity_stable():
+    tracker = StentorTracker()
+    tracker.max_anchor_drift = 30.0
+
+    spacing = 50
+    radius = 8
+    cols = 10
+    rows = 10
+    margin = 40
+    width = margin * 2 + (cols - 1) * spacing
+    height = margin * 2 + (rows - 1) * spacing
+
+    centers = [
+        (margin + c * spacing, margin + r * spacing)
+        for r in range(rows)
+        for c in range(cols)
+    ]
+
+    frame1 = np.full((height, width, 3), 255, dtype=np.uint8)
+    for center in centers:
+        cv2.circle(frame1, center, radius, (0, 255, 0), -1)
+    results1, _ = tracker.process_frame(frame1, timestamp=1.0)
+    assert len(results1) == len(centers)
+
+    shifted_centers = [(x + 2, y + 1) for x, y in centers]
+    frame2 = np.full((height, width, 3), 255, dtype=np.uint8)
+    for center in shifted_centers:
+        cv2.circle(frame2, center, radius, (0, 255, 0), -1)
+    results2, _ = tracker.process_frame(frame2, timestamp=1.1)
+    assert len(results2) == len(shifted_centers)
+
+    def nearest_id(results, center):
+        cx, cy = center
+        best = min(results, key=lambda res: (res.centroid[0] - cx) ** 2 + (res.centroid[1] - cy) ** 2)
+        return best.id
+
+    for center_before, center_after in zip(centers, shifted_centers):
+        assert nearest_id(results1, center_before) == nearest_id(results2, center_after)

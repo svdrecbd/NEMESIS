@@ -37,6 +37,11 @@ MASK_OPEN_ITERATIONS = 2
 HOME_BASE_ALPHA = 0.001
 MIN_CLASSIFY_HISTORY = 3
 QUEUE_POLL_TIMEOUT_S = 0.1
+SPATIAL_NEIGHBOR_OFFSETS = (
+    (-1, -1), (-1, 0), (-1, 1),
+    (0, -1),  (0, 0),  (0, 1),
+    (1, -1),  (1, 0),  (1, 1),
+)
 BGR_RED_CHANNEL = 2
 MASK_MAX_VALUE = 255
 COLOR_GREEN = (0, 255, 0)
@@ -216,20 +221,23 @@ class StentorTracker:
         # Match current blobs to existing tracks based on distance to Home Base
         active_tracks = []
         
-        # Simple greedy matching (O(N^2) but N=20 so it's instant)
-        # Cost matrix: Distance between blob centroid and track Home Base
+        # Greedy matching over spatially-gated candidates.
+        # Worst case remains O(N^2), but sparse scenes skip most pair checks.
         matched_blob_indices = set()
         matched_track_ids = set()
         
         # Sort potential matches by distance to favor closest locks
         matches = []
-        for t_id, track in self.tracks.items():
-            hx, hy = track['home_base']
-            for b_idx, blob in enumerate(current_blobs):
-                bx, by = blob['centroid']
-                dist = math.hypot(bx - hx, by - hy)
-                if dist < self.max_anchor_drift:
-                    matches.append((dist, t_id, b_idx))
+        drift = float(self.max_anchor_drift)
+        if drift > 0 and self.tracks and current_blobs:
+            blob_grid = self._build_blob_grid(current_blobs, drift)
+            for t_id, track in self.tracks.items():
+                hx, hy = track['home_base']
+                for b_idx in self._iter_nearby_blob_indices(blob_grid, hx, hy, drift):
+                    bx, by = current_blobs[b_idx]['centroid']
+                    dist = math.hypot(bx - hx, by - hy)
+                    if dist < drift:
+                        matches.append((dist, t_id, b_idx))
         
         matches.sort(key=lambda x: x[0]) # Closest matches first
         
@@ -286,6 +294,36 @@ class StentorTracker:
             results.append(res)
             
         return results, mask
+
+    def _build_blob_grid(self, blobs: List[dict], cell_size: float) -> Dict[Tuple[int, int], List[int]]:
+        grid: Dict[Tuple[int, int], List[int]] = {}
+        if cell_size <= 0:
+            return grid
+        for idx, blob in enumerate(blobs):
+            bx, by = blob['centroid']
+            key = (int(bx // cell_size), int(by // cell_size))
+            bucket = grid.get(key)
+            if bucket is None:
+                grid[key] = [idx]
+            else:
+                bucket.append(idx)
+        return grid
+
+    def _iter_nearby_blob_indices(
+        self,
+        grid: Dict[Tuple[int, int], List[int]],
+        home_x: float,
+        home_y: float,
+        cell_size: float,
+    ):
+        if cell_size <= 0:
+            return
+        cell_x = int(home_x // cell_size)
+        cell_y = int(home_y // cell_size)
+        for off_x, off_y in SPATIAL_NEIGHBOR_OFFSETS:
+            key = (cell_x + off_x, cell_y + off_y)
+            for idx in grid.get(key, ()):
+                yield idx
 
     def _create_track(self, blob, timestamp) -> int:
         tid = self._next_id

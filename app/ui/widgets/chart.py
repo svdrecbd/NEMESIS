@@ -23,6 +23,8 @@ STANDARD_X_LIMIT_MARGIN = 1.05
 STANDARD_MAJOR_TICK_MIN = 10
 STANDARD_MINOR_TICK_MIN = 1
 CONTRACTION_Y_LIMITS = (0.0, 1.0)
+TAP_LINE_OFFSET = 0.5
+TAP_LINE_LENGTH = 0.6
 CONTRACTION_LINE_OFFSET = 0.5
 CONTRACTION_LINE_LENGTH = 0.6
 CONTRACTION_LINEWIDTH = 1.2
@@ -256,7 +258,7 @@ class LiveChart:
             spine.set_color(text_color)
         ax_top.set_title("")
 
-        ax_bot.set_ylabel("Contractions", color=text_color)
+        ax_bot.set_ylabel("Contraction %", color=text_color)
         ax_bot.set_ylim(*CONTRACTION_Y_LIMITS)
         ax_bot.set_yticks([])
         ax_bot.tick_params(axis='x', colors=text_color)
@@ -376,6 +378,8 @@ class LiveChart:
                     orientation="horizontal",
                     colors=remaining_color,
                     linewidth=0.8,
+                    lineoffsets=TAP_LINE_OFFSET,
+                    linelengths=TAP_LINE_LENGTH,
                 )
             if completed_unit and not self.times_sec:
                 self.ax_top.eventplot(
@@ -383,12 +387,28 @@ class LiveChart:
                     orientation="horizontal",
                     colors=accent_color,
                     linewidth=1.0,
+                    lineoffsets=TAP_LINE_OFFSET,
+                    linelengths=TAP_LINE_LENGTH,
                 )
 
         if regular:
-            self.ax_top.eventplot(regular, orientation="horizontal", colors=text_color, linewidth=0.9)
+            self.ax_top.eventplot(
+                regular,
+                orientation="horizontal",
+                colors=text_color,
+                linewidth=0.9,
+                lineoffsets=TAP_LINE_OFFSET,
+                linelengths=TAP_LINE_LENGTH,
+            )
         if highlighted:
-            self.ax_top.eventplot(highlighted, orientation="horizontal", colors=accent_color, linewidth=1.6)
+            self.ax_top.eventplot(
+                highlighted,
+                orientation="horizontal",
+                colors=accent_color,
+                linewidth=1.6,
+                lineoffsets=TAP_LINE_OFFSET,
+                linelengths=TAP_LINE_LENGTH,
+            )
         if contraction_unit:
             self.ax_bot.eventplot(
                 contraction_unit,
